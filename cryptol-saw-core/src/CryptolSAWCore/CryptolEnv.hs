@@ -351,6 +351,7 @@ getNamingEnvForImport :: ME.ModuleEnv
                       -> MR.NamingEnv
 getNamingEnvForImport modEnv (vis, imprt) =
     MN.interpImportEnv imprt -- adjust for qualified imports
+  $ MN.namingEnvNames
   $ computeNamingEnv lm vis
 
   where
@@ -364,12 +365,12 @@ getNamingEnvForImport modEnv (vis, imprt) =
 
 -- | Compute a `MR.NamingEnv` for a module based on the
 --   `ImportVisibility`.
-computeNamingEnv :: ME.LoadedModule -> ImportVisibility -> Set MN.Name
+computeNamingEnv :: ME.LoadedModule -> ImportVisibility -> MR.NamingEnv
 computeNamingEnv lm vis =
   case vis of
-    PublicAndPrivate -> nmsPublic `Set.union` nmsPrivate -- all names defined, pub & pri
-    OnlyPublic       -> nmsPublic                        -- i.e., what's exported.
-                        -- FIXME[MT]: guessing here!! REVIEW and TEST!
+    PublicAndPrivate -> envPublicAndPrivate  -- all names defined, pub & pri
+    OnlyPublic       -> envPublic            -- i.e., what's exported.
+
   where
   -- NamingEnvs: --
 
@@ -381,7 +382,6 @@ computeNamingEnv lm vis =
     envTopLevels :: MR.NamingEnv
     envTopLevels = ME.lmNamingEnv lm
 
-    {-
     -- | envPublicAndPrivate - awkward as envTopLevels excludes privates
     envPublicAndPrivate :: MR.NamingEnv
     envPublicAndPrivate =
@@ -396,7 +396,6 @@ computeNamingEnv lm vis =
     envPublic = MN.filterUNames
                   (`Set.member` nmsPublic)
                   envTopLevels
-    -}
     
   -- Name Sets: --
 
