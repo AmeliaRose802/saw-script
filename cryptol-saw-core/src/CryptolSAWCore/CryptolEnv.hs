@@ -364,12 +364,12 @@ getNamingEnvForImport modEnv (vis, imprt) =
 
 -- | Compute a `MR.NamingEnv` for a module based on the
 --   `ImportVisibility`.
-computeNamingEnv :: ME.LoadedModule -> ImportVisibility -> MR.NamingEnv
+computeNamingEnv :: ME.LoadedModule -> ImportVisibility -> Set MN.Name
 computeNamingEnv lm vis =
   case vis of
-    PublicAndPrivate -> envPublicAndPrivate  -- all names defined, pub & pri
-    OnlyPublic       -> envPublic            -- i.e., what's exported.
-
+    PublicAndPrivate -> nmsPublic `Set.union` nmsPrivate -- all names defined, pub & pri
+    OnlyPublic       -> nmsPublic                        -- i.e., what's exported.
+                        -- FIXME[MT]: guessing here!! REVIEW and TEST!
   where
   -- NamingEnvs: --
 
@@ -377,9 +377,11 @@ computeNamingEnv lm vis =
     --    - Does not include privates in submodules (which makes for
     --      much of the complications of this function).
     --    - Includes everything in scope at the toplevel of 'lm' module
+
     envTopLevels :: MR.NamingEnv
     envTopLevels = ME.lmNamingEnv lm
 
+    {-
     -- | envPublicAndPrivate - awkward as envTopLevels excludes privates
     envPublicAndPrivate :: MR.NamingEnv
     envPublicAndPrivate =
@@ -394,7 +396,8 @@ computeNamingEnv lm vis =
     envPublic = MN.filterUNames
                   (`Set.member` nmsPublic)
                   envTopLevels
-
+    -}
+    
   -- Name Sets: --
 
     -- | names in scope at Top level of module
@@ -1094,7 +1097,10 @@ resolveIdentifier env nm =
                MM.minpTCSolver = solver
            }
        (res, _ws) <- MM.runModuleM minp $
-          MM.interactive (MB.rename interactiveName nameEnv (MR.renameVar MR.NameUse pnm))
+          MM.interactive (MB.rename interactiveName nameEnv
+                                 -- (MR.renameVar MR.NameUse pnm)
+                                    (MR.resolveNameUse C.NSValue pnm)
+                         )
        case res of
          Left _ -> pure Nothing
          Right (x,_) -> pure (Just x)
@@ -1173,7 +1179,11 @@ parseDecls sc env input = do
     let topdecls = [ P.Decl (P.TopLevel P.Public Nothing d) | d <- npdecls ]
 
     -- Resolve names
-    (_nenv, rdecls) <- MM.interactive (MB.rename interactiveName (getNamingEnv env) (MR.renameTopDecls interactiveName topdecls))
+    (_nenv, rdecls) <- MM.interactive
+        (MB.rename interactiveName
+                   (getNamingEnv env)
+                   (MR.renameTopDecls topdecls)
+        )
 
     -- Create a Module to contain the declarations
     let rmodule = P.Module { P.mName = locatedUnknown interactiveName
@@ -1223,7 +1233,10 @@ parseSchema env input = do
 
     -- Resolve names
     let nameEnv = getNamingEnv env
-    rschema <- MM.interactive (MB.rename interactiveName nameEnv (MR.rename pschema))
+    rschema <- MM.interactive
+             $ MB.rename interactiveName nameEnv
+                (MR.renameSchema pschema (\sig-> pure sig))
+                -- FIXME[MT]: guessing
 
     let ifDecls = C.getAllIfaceDecls modEnv
     let range = fromMaybe P.emptyRange (P.getLoc rschema)
