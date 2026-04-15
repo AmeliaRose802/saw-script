@@ -145,7 +145,8 @@ tcDiv =
 tcMod : Num -> Num -> Num;
 tcMod =
   binaryNumFun (\ (x:Nat) -> \ (y:Nat) -> modNat x y)
-               (\ (x:Nat) -> TCNum 0)
+               -- x % infinity = x, since infinity*0 + x = x
+               (\ (x:Nat) -> TCNum x)
                -- infinity % y = 0, since y*infinity + 0 = infinity
                (\ (y:Nat) -> TCNum 0)
                -- infinity % infinity = 0
