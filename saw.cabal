@@ -719,6 +719,7 @@ library saw-server
     directory,
     lens,
     mtl,
+    prettyprinter,
     silently,
     text,
     unordered-containers,
