@@ -40,6 +40,7 @@ module SAWCentral.Crucible.Common.MethodSpec
   , ExtType
   , PointsTo
   , AllocGlobal
+  , VtableBinding
   , ResolvedState
 
   , XSetupNull
@@ -90,6 +91,7 @@ module SAWCentral.Crucible.Common.MethodSpec
   , csArgBindings
   , csRetValue
   , csGlobalAllocs
+  , csVtableBindings
   , csCodebase
   , csLoc
   , ProofMethod(..)
@@ -477,6 +479,7 @@ data CrucibleMethodSpecIR ext =
   , _csArgBindings     :: Map Integer (ExtType ext, SetupValue ext) -- ^ function arguments
   , _csRetValue        :: Maybe (SetupValue ext) -- ^ function return value
   , _csGlobalAllocs    :: [AllocGlobal ext] -- ^ globals allocated
+  , _csVtableBindings  :: [VtableBinding ext] -- ^ vtable slot overrides for virtual dispatch
   , _csCodebase        :: Codebase ext -- ^ the codebase this spec was verified against
   , _csLoc             :: ProgramLoc -- ^ where in the SAWscript was this spec?
   }
@@ -576,6 +579,7 @@ makeCrucibleMethodSpecIR meth args ret loc code = do
     ,_csArgBindings     = Map.empty
     ,_csRetValue        = Nothing
     ,_csGlobalAllocs    = []
+    ,_csVtableBindings  = []
     ,_csLoc             = loc
     ,_csCodebase        = code
     }

@@ -33,6 +33,7 @@ module SAWCentral.Crucible.Common.Setup.Value
   , ExtType
   , PointsTo
   , AllocGlobal
+  , VtableBinding
   , ResolvedState
 
   , XSetupNull
@@ -100,6 +101,9 @@ type family PointsTo ext :: Type
 
 -- | The type of global allocations
 type family AllocGlobal ext :: Type
+
+-- | The type of vtable binding specifications (for C++ virtual dispatch)
+type family VtableBinding ext :: Type
 
 -- | The type of \"resolved\" state
 type family ResolvedState ext :: Type

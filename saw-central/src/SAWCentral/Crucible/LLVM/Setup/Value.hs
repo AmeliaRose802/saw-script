@@ -63,6 +63,8 @@ module SAWCentral.Crucible.LLVM.Setup.Value
     -- * AllocGlobal
   , LLVMAllocGlobal(..)
   , prettyAllocGlobal
+    -- * VtableBinding
+  , LLVMVtableBinding(..)
     -- * ResolvedState
   , LLVMResolvedState(..)
   , ResolvedPath
@@ -328,6 +330,24 @@ prettyAllocGlobal (LLVMAllocGlobal _loc (L.Symbol name)) =
 
 instance PPL.Pretty (LLVMAllocGlobal arch) where
   pretty = prettyAllocGlobal
+
+--------------------------------------------------------------------------------
+-- ** VtableBinding
+
+type instance Setup.VtableBinding (LLVM arch) = LLVMVtableBinding arch
+
+-- | A binding that associates a vtable slot of an allocated object with
+-- a proved method specification. During simulation, this causes indirect
+-- calls through that vtable slot to be handled by the specified override.
+-- The method name is used to match against the proved lemmas at simulation time.
+data LLVMVtableBinding arch = LLVMVtableBinding
+  { vtableBindObject     :: Setup.SetupValue (LLVM arch)
+    -- ^ The object pointer whose vtable is being configured
+  , vtableBindSlot       :: !Int
+    -- ^ Zero-based vtable slot index
+  , vtableBindMethodName :: Text
+    -- ^ Name of the function spec to use as override (matched against lemmas)
+  }
 
 --------------------------------------------------------------------------------
 -- *** ResolvedState
