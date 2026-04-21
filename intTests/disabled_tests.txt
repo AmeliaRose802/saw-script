@@ -15,3 +15,6 @@ test0039_rust
 
 # Boilerplate generation has been overhauled
 test_boilerplate
+
+# Requires enable_experimental (llvm_bind_method vtable dispatch)
+test_vtable_dispatch

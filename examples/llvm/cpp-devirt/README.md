@@ -79,13 +79,19 @@ make verify
 ## What About Non-Devirtualized Calls?
 
 For virtual calls that the optimizer *cannot* resolve — e.g.,
-`apply_interface(Transformer* t, uint32_t x)` in this example — SAW will need
+`apply_interface(Transformer* t, uint32_t x)` in this example — SAW needs
 a way to bind a specific method implementation at verification time.
 
-This capability is tracked in **saw-script-22h** (`llvm_bind_method`), which
-will allow you to specify which concrete method a virtual call should dispatch
-to during verification, even when the bitcode retains an indirect call.
+This capability is provided by `llvm_bind_method` (requires
+`enable_experimental`), which lets you specify which concrete method a virtual
+call should dispatch to during verification, even when the bitcode retains an
+indirect call.
 
-Until `llvm_bind_method` is available, the workaround is to ensure that the
+See the **[vtable-dispatch](../vtable-dispatch/)** example for a complete
+proof-of-concept that uses `llvm_bind_method` to verify a function with
+virtual dispatch — modeled after the IsMachineEnabled pattern from MSP's
+KeyExchangeSession.
+
+If `llvm_bind_method` is not available, the workaround is to ensure that the
 code you verify only uses patterns that *do* devirtualize (see the table
 above).

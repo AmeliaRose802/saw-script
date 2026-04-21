@@ -1,0 +1,49 @@
+// verify_vtable.saw — Verify apply_interface using llvm_bind_method.
+//
+// apply_interface(Transformer* t, uint32_t x) calls t->apply(x) through
+// a vtable. The optimizer cannot devirtualize this because the concrete
+// type of `t` is unknown.
+//
+// We use llvm_bind_method to bind vtable slot 0 (apply is the first
+// virtual method after the vtable header) to a spec that doubles its input,
+// then verify that apply_interface returns x * 2.
+//
+// Prerequisites: devirt.bc (built via `make`)
+
+enable_experimental;
+
+m <- llvm_load_module "devirt.bc";
+
+// Spec for the virtual method: Transformer::apply(uint32_t x) -> uint32_t
+// In the vtable layout, apply is at slot 0 (the destructor may be at a
+// negative offset or omitted in the optimized IR — inspect devirt.ll to
+// confirm the actual slot index).
+let apply_doubler_spec = do {
+    self <- llvm_alloc (llvm_array 8 (llvm_int 8));
+    x <- llvm_fresh_var "x" (llvm_int 32);
+
+    llvm_execute_func [self, llvm_term x];
+
+    llvm_return (llvm_term {{ x * 2 : [32] }});
+};
+
+apply_lemma <- llvm_unsafe_assume_spec m "apply" apply_doubler_spec;
+
+// Spec for apply_interface using vtable dispatch
+let apply_interface_spec = do {
+    t <- llvm_alloc (llvm_array 8 (llvm_int 8));
+    x <- llvm_fresh_var "x" (llvm_int 32);
+
+    // Bind vtable slot 0 to the Doubler::apply spec
+    llvm_bind_method t 0 apply_lemma;
+
+    llvm_execute_func [t, llvm_term x];
+
+    llvm_return (llvm_term {{ x * 2 : [32] }});
+};
+
+llvm_verify m "apply_interface" [apply_lemma] false
+    apply_interface_spec
+    z3;
+
+print "✓ apply_interface verified: vtable dispatch with llvm_bind_method";
