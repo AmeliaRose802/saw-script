@@ -20,6 +20,7 @@ module SAWCentral.Crucible.LLVM.CrucibleLLVM
     -- * Re-exports from "Lang.Crucible.LLVM.Bytes"
   , Bytes
   , bytesToBits
+  , bytesToBV
   , bytesToInteger
   , toBytes
     -- * Re-exports from "Lang.Crucible.LLVM.DataLayout"
@@ -86,6 +87,8 @@ module SAWCentral.Crucible.LLVM.CrucibleLLVM
   , Mem
   , MemImpl
   , doMalloc
+  , doInstallHandle
+  , SomeFnHandle(..)
   , doLoad
   , doStore
   , loadRaw
@@ -139,7 +142,7 @@ import Lang.Crucible.LLVM
   (llvmGlobals, llvmExtensionImpl, registerLazyModule)
 
 import Lang.Crucible.LLVM.Bytes
-  (Bytes, bytesToBits, bytesToInteger, toBytes)
+  (Bytes, bytesToBits, bytesToBV, bytesToInteger, toBytes)
 
 import Lang.Crucible.LLVM.DataLayout
   (Alignment, noAlignment, padToAlignment, DataLayout, EndianForm(..),
@@ -175,7 +178,7 @@ import Lang.Crucible.LLVM.MemModel
   (Mem, MemImpl, doResolveGlobal, storeRaw, storeConstRaw, mallocRaw, mallocConstRaw,
    ppMem, packMemValue, unpackMemValue, buildDisjointRegionsAssertion,
    doLoad, doStore, loadRaw, doPtrAddOffset, assertSafe, isZero, testEqual,
-   emptyMem, doMalloc, mkMemVar,
+   emptyMem, doMalloc, doInstallHandle, SomeFnHandle(..), mkMemVar,
    LLVMVal(..),
    LLVMPtr, HasPtrWidth, ptrToPtrVal, mkNullPointer, ptrIsNull, ppPtr, ptrEq,
    pattern LLVMPointerRepr, LLVMPointerType,

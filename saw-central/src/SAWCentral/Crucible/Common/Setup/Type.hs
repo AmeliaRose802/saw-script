@@ -24,6 +24,7 @@ module SAWCentral.Crucible.Common.Setup.Type
   , currentState
   , addPointsTo
   , addAllocGlobal
+  , addVtableBinding
   , addCondition
   , freshTypedVariable
   , freshVariable
@@ -111,6 +112,9 @@ addPointsTo pt = currentState . MS.csPointsTos %= (pt : )
 
 addAllocGlobal :: Monad m => MS.AllocGlobal ext -> CrucibleSetupT ext m ()
 addAllocGlobal ag = csMethodSpec . MS.csGlobalAllocs %= (ag : )
+
+addVtableBinding :: Monad m => MS.VtableBinding ext -> CrucibleSetupT ext m ()
+addVtableBinding vb = csMethodSpec . MS.csVtableBindings %= (vb : )
 
 addCondition :: Monad m => MS.SetupCondition ext -> CrucibleSetupT ext m ()
 addCondition cond = currentState . MS.csConditions %= (cond : )
