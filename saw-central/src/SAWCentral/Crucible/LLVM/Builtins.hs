@@ -1417,7 +1417,11 @@ registerVtableOverrides opts cc simCtx _top_loc mdMap mspec funcLemmas allocEnv 
                       -- (vtablePtr) here, we need reads to use the write-log
                       -- path which preserves provenance.
                       let (objBlk, _) = Crucible.llvmPointerView objPtr
-                          mem4' = Crucible.memRemoveArrayBlock objBlk mem4
+                          mem4' = mem4
+                            { Crucible.memImplHeap =
+                                Crucible.memRemoveArrayBlock objBlk
+                                  (Crucible.memImplHeap mem4)
+                            }
 
                       mem5 <- liftIO $
                         Crucible.storeRaw bak mem4' objPtr ptrStorTy
