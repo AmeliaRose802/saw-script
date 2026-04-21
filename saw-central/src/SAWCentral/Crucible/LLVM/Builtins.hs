@@ -47,6 +47,7 @@ module SAWCentral.Crucible.LLVM.Builtins
     , llvm_points_to_bitfield
     , llvm_fresh_pointer
     , llvm_unsafe_assume_spec
+    , llvm_bind_method
     , llvm_fresh_var
     , llvm_fresh_cryptol_var
     , llvm_alloc
@@ -2435,6 +2436,36 @@ llvm_fresh_pointer lty =
 
 llvm_cast_pointer :: AllLLVM SetupValue -> L.Type -> AllLLVM SetupValue
 llvm_cast_pointer ptr lty = mkAllLLVM (SetupCast lty (getAllLLVM ptr))
+
+-- | Bind a virtual method override for indirect calls through a vtable.
+--
+-- This command is intended to let users specify that, during verification,
+-- indirect calls originating from loading a vtable pointer at a given slot
+-- offset of a given object allocation should be overridden with the provided
+-- method specification.
+--
+-- @
+-- llvm_bind_method obj_ptr slot_index method_spec
+-- @
+--
+-- * @obj_ptr@: a setup value representing the object pointer
+-- * @slot_index@: the vtable slot index (zero-based)
+-- * @method_spec@: a proved specification (from @llvm_verify@) to use as override
+--
+-- TODO: Extend Crucible override dispatch to intercept indirect calls
+-- matching the vtable slot for the given allocation.
+llvm_bind_method ::
+  AllLLVM SetupValue           {- ^ object pointer setup value -} ->
+  Int                          {- ^ vtable slot index -} ->
+  SomeLLVM MS.ProvedSpec       {- ^ method spec for the virtual method -} ->
+  LLVMCrucibleSetupM ()
+llvm_bind_method _objPtr _slotIdx _methodSpec =
+  throwLLVMFun "llvm_bind_method" $ unlines
+    [ "llvm_bind_method is not yet implemented."
+    , "Virtual dispatch override requires extending Crucible's override"
+    , "dispatch to intercept indirect calls through vtable pointers."
+    , "See: https://github.com/GaloisInc/saw-script/issues/22h"
+    ]
 
 constructFreshPointer ::
   Crucible.HasPtrWidth (Crucible.ArchWidth arch) =>
