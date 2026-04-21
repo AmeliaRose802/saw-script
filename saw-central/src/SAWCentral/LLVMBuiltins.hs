@@ -21,15 +21,17 @@ module SAWCentral.LLVMBuiltins (
       llvm_packed_struct_type,
       llvm_pointer,
       llvm_struct_type,
-      llvm_symbol_exists
+      llvm_vtable_slots
   ) where
 
 import Data.String
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Parameterized.Some
-import Control.Monad (unless)
+import Control.Monad (unless, forM_)
 import Control.Monad.State (gets)
+import Data.List (isPrefixOf, isSuffixOf)
+import Data.Maybe (mapMaybe, catMaybes)
 
 import qualified Text.LLVM.AST as LLVM
 import qualified Data.LLVM.BitCode as LLVM
@@ -100,16 +102,115 @@ llvm_pointer = LLVM.PtrTo
 llvm_struct_type :: [LLVM.Type] -> LLVM.Type
 llvm_struct_type = LLVM.Struct
 
--- | Provides the ability to check if the specified symbol is present in the
--- LLVMModule.  The symbol could refer to anything: a defined function, an
--- external function, a variable, etc.
-
-llvm_symbol_exists :: Some CMS.LLVMModule -> Text -> TopLevel Bool
-llvm_symbol_exists (Some llvmMod) symbol =
+-- | Display the vtable layout for classes matching the given pattern.
+--
+-- This command searches the LLVM module for vtables (global variables with
+-- mangled names starting with _ZTV) that match the given class name pattern,
+-- and displays which method occupies each vtable slot.
+--
+-- Example usage:
+--   llvm_vtable_slots m "MyClass"
+--
+-- Example output:
+--   Vtable for _ZTV7MyClass:
+--     slot 0: offset-to-top
+--     slot 1: RTTI
+--     slot 2: ~MyClass (destructor)
+--     slot 3: MyClass::method1
+--     slot 4: MyClass::method2
+llvm_vtable_slots :: Some CMS.LLVMModule -> String -> TopLevel ()
+llvm_vtable_slots (Some llvmMod) classPattern = do
   let ast = CMS.modAST llvmMod
-      tgt = fromString $ Text.unpack symbol
-      search getSym = any ((tgt ==) . getSym)
-  in return
-     $ (search LLVM.globalSym $ LLVM.modGlobals ast)
-     || (search LLVM.defName $ LLVM.modDefines ast)
-     || (search LLVM.decName $ LLVM.modDeclares ast)
+      globals = LLVM.modGlobals ast
+      -- Find vtables: globals with names starting with "_ZTV" containing the pattern
+      vtables = filter (isVtableForClass classPattern) globals
+
+  if null vtables
+    then printOutLnTop Info $ "No vtables found matching pattern: " ++ classPattern
+    else forM_ vtables $ \vtable -> do
+      let vtableName = show (LLVM.globalSym vtable)
+      printOutLnTop Info $ "\nVtable for " ++ vtableName ++ ":"
+      case LLVM.globalValue vtable of
+        Nothing -> printOutLnTop Info "  (no initializer)"
+        Just initializer -> printVtableSlots initializer
+
+-- | Check if a global variable is a vtable for a class matching the pattern.
+isVtableForClass :: String -> LLVM.Global -> Bool
+isVtableForClass pattern global =
+  let name = show (LLVM.globalSym global)
+      -- Vtables have mangled names starting with _ZTV
+      isVtable = "_ZTV" `isPrefixOf` name
+      -- Check if the pattern appears in the vtable name
+      matchesPattern = pattern `isSubsequenceOf` name
+  in isVtable && matchesPattern
+
+-- | Helper to check if one string is a subsequence of another (case-insensitive).
+isSubsequenceOf :: String -> String -> Bool
+isSubsequenceOf pattern str =
+  let lowerPattern = map toLower pattern
+      lowerStr = map toLower str
+  in lowerPattern `isInfixOf` lowerStr
+  where
+    toLower c | c >= 'A' && c <= 'Z' = toEnum (fromEnum c + 32)
+              | otherwise = c
+    isInfixOf needle haystack = any (needle `isPrefixOf`) (tails haystack)
+    tails [] = [[]]
+    tails xs@(_:xs') = xs : tails xs'
+
+-- | Print the slots of a vtable initializer.
+printVtableSlots :: LLVM.Value -> TopLevel ()
+printVtableSlots value = do
+  let slots = extractVtableSlots value
+  if null slots
+    then printOutLnTop Info "  (could not parse vtable structure)"
+    else forM_ (zip [0..] slots) $ \(idx, slotDesc) ->
+      printOutLnTop Info $ "  slot " ++ show (idx :: Int) ++ ": " ++ slotDesc
+
+-- | Extract slot descriptions from a vtable initializer value.
+-- Vtables are typically structs or arrays containing function pointers.
+extractVtableSlots :: LLVM.Value -> [String]
+extractVtableSlots val = case val of
+  -- Vtables are often struct initializers
+  LLVM.ValStruct _ fields -> concatMap extractFromField fields
+  
+  -- Or arrays of structs
+  LLVM.ValArray _ elements -> concatMap extractVtableSlots elements
+  
+  -- Packed structs
+  LLVM.ValPackedStruct _ fields -> concatMap extractFromField fields
+  
+  -- Sometimes they're just directly initialized with values
+  _ -> [describeValue val]
+
+-- | Extract slot info from a struct field, which might be nested.
+extractFromField :: LLVM.Value -> [String]
+extractFromField val = case val of
+  LLVM.ValStruct _ fields -> concatMap extractFromField fields
+  LLVM.ValArray _ elements -> map describeValue elements
+  LLVM.ValPackedStruct _ fields -> concatMap extractFromField fields
+  _ -> [describeValue val]
+
+-- | Describe a single vtable slot value.
+describeValue :: LLVM.Value -> String
+describeValue val = case val of
+  -- Function pointer
+  LLVM.ValSymbol sym -> show sym
+  
+  -- Null pointer (unused slot or end marker)
+  LLVM.ValZeroInit _ -> "null"
+  
+  -- Constant integer (offset-to-top, etc.)
+  LLVM.ValInteger i -> "constant " ++ show i
+  
+  -- Bitcast of a function pointer
+  LLVM.ValConstExpr (LLVM.ConstConv LLVM.BitCast _ (LLVM.Typed _ inner)) ->
+    describeValue inner
+  
+  -- Pointer arithmetic (GEP)
+  LLVM.ValConstExpr (LLVM.ConstGEP{}) -> "offset/GEP"
+  
+  -- Other constant expressions
+  LLVM.ValConstExpr _ -> "const-expr"
+  
+  -- Metadata or other
+  _ -> "?"
