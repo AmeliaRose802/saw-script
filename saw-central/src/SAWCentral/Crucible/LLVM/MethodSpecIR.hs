@@ -66,6 +66,8 @@ module SAWCentral.Crucible.LLVM.MethodSpecIR
     -- * AllocGlobal
   , LLVMAllocGlobal(..)
   , prettyAllocGlobal
+    -- * VtableBinding
+  , LLVMVtableBinding(..)
     -- * Intrinsics
   , intrinsics
     -- * Initial CrucibleSetupMethodSpec
