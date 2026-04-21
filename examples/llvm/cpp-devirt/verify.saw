@@ -1,0 +1,31 @@
+// verify.saw — Verify the devirtualized double_concrete function.
+//
+// After LTO devirtualization, double_concrete(x) reduces to a direct
+// computation equivalent to x * 2.  This script proves that equivalence
+// using SAW's symbolic execution and the Z3 SMT solver.
+
+// Load the optimized bitcode produced by the Makefile pipeline.
+m <- llvm_load_module "devirt.bc";
+
+// Specification: double_concrete takes a 32-bit unsigned integer and
+// returns that integer multiplied by two (using wrapping bitvector
+// arithmetic).
+let double_concrete_spec = do {
+    x <- llvm_fresh_var "x" (llvm_int 32);
+
+    llvm_execute_func [llvm_term x];
+
+    llvm_return (llvm_term {{ x * 2 : [32] }});
+};
+
+// Verify the specification against the bitcode.
+// Arguments to llvm_verify:
+//   m                     — the loaded LLVM module
+//   "double_concrete"     — the function to verify
+//   []                    — no prior lemmas needed
+//   false                 — do not check path satisfiability
+//   double_concrete_spec  — the specification above
+//   z3                    — use the Z3 solver
+llvm_verify m "double_concrete" [] false double_concrete_spec z3;
+
+print "✓ double_concrete verified: returns x * 2 after devirtualization";
