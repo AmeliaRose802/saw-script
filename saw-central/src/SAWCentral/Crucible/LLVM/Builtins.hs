@@ -155,6 +155,7 @@ import qualified Lang.Crucible.LLVM.Bytes as Crucible
 import qualified Lang.Crucible.LLVM.Functions as Crucible
 import qualified Lang.Crucible.LLVM.Intrinsics as Crucible
 import qualified Lang.Crucible.LLVM.MemModel as Crucible
+import qualified Lang.Crucible.LLVM.MemModel.MemLog as CrucibleMemLog
 import qualified Lang.Crucible.LLVM.MemType as Crucible
 import qualified Lang.Crucible.LLVM.PrettyPrint as Crucible
 import           Lang.Crucible.LLVM.QQ( llvmOvr )
@@ -1412,7 +1413,19 @@ registerVtableOverrides opts cc simCtx _top_loc mdMap mspec funcLemmas allocEnv 
                       -- (vtablePtr) here, we need reads to use the write-log
                       -- path which preserves provenance.
                       let (objBlk, _) = Crucible.llvmPointerView objPtr
-                          mem4' = Crucible.memRemoveArrayBlock objBlk mem4
+                          mem4' =
+                            case W4.asNat objBlk of
+                              Just objBlkNo ->
+                                let heap = Crucible.memImplHeap mem4 in
+                                mem4
+                                  { Crucible.memImplHeap =
+                                      heap
+                                        { CrucibleMemLog.memArrayBlocks =
+                                            Set.delete objBlkNo
+                                              (CrucibleMemLog.memArrayBlocks heap)
+                                        }
+                                  }
+                              Nothing -> mem4
 
                       mem5 <- liftIO $
                         Crucible.storeRaw bak mem4' objPtr ptrStorTy

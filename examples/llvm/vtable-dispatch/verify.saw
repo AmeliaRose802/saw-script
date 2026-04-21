@@ -1,70 +1,74 @@
-// verify.saw — Verify IsMachineEnabled pattern using vtable dispatch.
+// verify.saw — Verify the IsMachineEnabled decision rule using vtable dispatch.
 //
-// This is the proof-of-concept for verifying C++ virtual method calls with SAW.
-// The function `is_machine_enabled` calls through a vtable pointer to invoke
-// GetMachineConfiguration, then returns a boolean based on the result.
+// This proof binds the virtual GetMachineConfiguration call to symbolic
+// (ks_result, host_enabled) values and proves the caller returns exactly:
 //
-// We use `llvm_bind_method` to intercept the indirect call at vtable slot 1
-// and provide a specification for GetMachineConfiguration.
+//   ks_result == SUCCESS && host_enabled != 0
+//
+// via llvm_bind_method.
 
 enable_experimental;
 
 // Load the bitcode module containing is_machine_enabled.
 m <- llvm_load_module "vtable_dispatch.bc";
 
-// ── Step 1: Specification for the virtual method ──────────────────────────
+// ── Step 1: Symbolic outputs for the virtual method ───────────────────────
 //
 // GetMachineConfiguration(self, container_id, config_out) -> i32
 //
 // This is the virtual method at vtable slot 1.  We specify that it:
 //   - Takes a self pointer, a container ID, and a config output pointer
-//   - Returns a symbolic result (ks_result)
-//   - Writes a symbolic value (host_enabled) to *config_out
+//   - Returns a symbolic KeyStore result (ks_result)
+//   - Writes a symbolic ParsedConfig.hostDataEnabled value to *config_out
 //
 // We use llvm_unsafe_assume_spec because GetMachineConfiguration is a pure
 // virtual method — there's no implementation in the bitcode to verify against.
 
-let get_config_spec = do {
+ks_result <- fresh_symbolic "ks_result" {| [32] |};
+host_enabled <- fresh_symbolic "host_enabled" {| [32] |};
+
+let expected_ret = {{
+    if (ks_result == (0:[32])) && (host_enabled != (0:[32]))
+    then (1:[32])
+    else (0:[32])
+}};
+
+let get_config_spec ks_result_val host_enabled_val = do {
     self <- llvm_alloc (llvm_array 16 (llvm_int 8));
     container_id <- llvm_fresh_var "container_id" (llvm_int 32);
     config_out <- llvm_alloc (llvm_int 32);
 
     llvm_execute_func [self, llvm_term container_id, config_out];
 
-    ks_result <- llvm_fresh_var "ks_result" (llvm_int 32);
-    host_enabled <- llvm_fresh_var "host_enabled" (llvm_int 32);
-    llvm_points_to config_out (llvm_term host_enabled);
-    llvm_return (llvm_term ks_result);
+    llvm_points_to config_out (llvm_term host_enabled_val);
+    llvm_return (llvm_term ks_result_val);
 };
 
 // Assume the spec — we can't verify a pure virtual method.
-get_config_lemma <- llvm_unsafe_assume_spec m "get_config" get_config_spec;
+get_config_lemma <- llvm_unsafe_assume_spec m "get_config"
+    (get_config_spec ks_result host_enabled);
 
-// ── Step 2: Verify is_machine_enabled (success case) ──────────────────────
+// ── Step 2: Verify the caller computes the exact decision function ────────
 //
-// When GetMachineConfiguration returns 0 (SUCCESS) and writes a non-zero
-// config value, is_machine_enabled should return 1.
+// Instead of merely proving the call does not crash, we prove the boolean
+// result matches the symbolic keystore outputs exactly.
 
-let success_spec = do {
-    keystore <- llvm_alloc (llvm_array 16 (llvm_int 8));
+let decision_spec = do {
+    keystore <- llvm_alloc_aligned 8 (llvm_array 16 (llvm_int 8));
     container_id <- llvm_fresh_var "container_id" (llvm_int 32);
 
     llvm_bind_method keystore 1 get_config_lemma;
 
     llvm_execute_func [keystore, llvm_term container_id];
 
-    // We don't constrain the return value — this verifies that the function
-    // executes successfully through the vtable dispatch without crashing.
-    // The vtable call resolves to our assumed get_config spec.
-    ret <- llvm_fresh_var "ret" (llvm_int 32);
-    llvm_return (llvm_term ret);
+    llvm_return (llvm_term expected_ret);
 };
 
 // Verify: is_machine_enabled executes correctly with vtable dispatch.
 // Pass get_config_lemma in the lemmas list so llvm_bind_method can find it.
 llvm_verify m "is_machine_enabled" [get_config_lemma] false
-    success_spec
+    decision_spec
     z3;
 
-print "✓ is_machine_enabled verified: vtable dispatch works end-to-end";
+print "✓ is_machine_enabled verified: vtable dispatch proves the decision logic";
 

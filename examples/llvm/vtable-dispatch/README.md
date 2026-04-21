@@ -52,6 +52,7 @@ During verification, SAW:
 2. Installs the override at the specified slot
 3. Writes the vtable pointer into the object at offset 0
 4. When the indirect call loads from that slot, it resolves to the override
+5. Proves the caller's return value matches the symbolic keystore result
 
 ### Memory Layout
 
@@ -72,7 +73,7 @@ synthetic vtable: [slot_0 | slot_1 | ... ]
 | `vtable_dispatch.cpp` | C++ source showing the IsMachineEnabled pattern |
 | `vtable_dispatch.ll` | LLVM IR with the vtable dispatch pattern |
 | `vtable_dispatch.bc` | Pre-compiled LLVM bitcode |
-| `verify.saw` | SAW verification script using `llvm_bind_method` |
+| `verify.saw` | SAW proof that the return is `(ks_result == SUCCESS && host_enabled)` |
 | `gen_bitcode.py` | Python script to regenerate bitcode (uses llvmlite) |
 | `Makefile` | Build and verification pipeline |
 
@@ -100,16 +101,17 @@ python gen_bitcode.py --ll
 
 ## Relationship to Real MSP Verification
 
-This proof-of-concept verifies the same pattern as `IsMachineEnabled` in the
-real MSP `KeyExchangeSession` bitcode (`out/KeyExchangeSession_v20_clean.bc`).
+This proof-of-concept verifies the same control-flow pattern as
+`IsMachineEnabled` in the real MSP `KeyExchangeSession` bitcode
+(`out/KeyExchangeSession_v20_clean.bc`) and proves the exact decision rule.
 
 The differences from the real bitcode are:
 - Simplified types: uses raw `i32` instead of C++ `std::tuple`
 - Single vtable slot instead of full interface vtable
 - No MSVC `std::basic_string` SSO complications (see saw-script-ygg)
 
-Once this proof-of-concept passes, the same approach can be applied to the
-real bitcode with only type-level adjustments.
+That means the remaining gap to the real bitcode is ABI/layout modeling, not
+the virtual-dispatch reasoning itself.
 
 ## Prerequisites
 
