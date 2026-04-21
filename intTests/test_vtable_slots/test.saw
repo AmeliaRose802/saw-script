@@ -1,0 +1,17 @@
+// Test for llvm_vtable_slots command
+
+enable_experimental;
+
+// Load the LLVM module
+m <- llvm_load_module "example.bc";
+
+// Test: Display vtable layout for IKeyStore
+llvm_vtable_slots m "IKeyStore";
+
+// Test: Display vtable layout for ConcreteKeyStore  
+llvm_vtable_slots m "ConcreteKeyStore";
+
+// Test: Non-existent class (should print message)
+llvm_vtable_slots m "NonExistentClass";
+
+print "✓ llvm_vtable_slots test completed";
