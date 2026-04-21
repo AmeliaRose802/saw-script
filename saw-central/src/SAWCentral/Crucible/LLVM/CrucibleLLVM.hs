@@ -30,6 +30,7 @@ module SAWCentral.Crucible.LLVM.CrucibleLLVM
   , DataLayout
   , intWidthSize
   , ptrBitwidth
+  , ptrAlign
   , integerAlignment
   , floatAlignment
   , fromAlignment
@@ -146,7 +147,8 @@ import Lang.Crucible.LLVM.Bytes
 
 import Lang.Crucible.LLVM.DataLayout
   (Alignment, noAlignment, padToAlignment, DataLayout, EndianForm(..),
-   integerAlignment, floatAlignment, fromAlignment, intWidthSize, ptrBitwidth)
+   integerAlignment, floatAlignment, fromAlignment, intWidthSize, ptrBitwidth,
+   ptrAlign)
 
 import Lang.Crucible.LLVM.Extension
   (ArchWidth, LLVMArch)
