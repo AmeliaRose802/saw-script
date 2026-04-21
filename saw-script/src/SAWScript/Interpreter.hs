@@ -6036,6 +6036,32 @@ primitives = Map.fromList $
     Current
     [ "Load a function from the given LLVM module into a Crucible CFG." ]
 
+  , prim "llvm_vtable_slots"  "LLVMModule -> String -> TopLevel ()"
+    (pureVal llvm_vtable_slots)
+    Experimental
+    [ "Display the vtable layout for classes matching the given name pattern."
+    , ""
+    , "This command searches the LLVM module for vtables (mangled C++ names"
+    , "starting with _ZTV) that match the given class name pattern, and prints"
+    , "which method occupies each vtable slot."
+    , ""
+    , "Example: llvm_vtable_slots m \"IKeyStore\""
+    , ""
+    , "Output format:"
+    , "  Vtable for _ZTV9IKeyStore:"
+    , "    slot 0: offset-to-top"
+    , "    slot 1: RTTI"
+    , "    slot 2: ~IKeyStore (destructor)"
+    , "    slot 3: IKeyStore::Read"
+    , "    slot 4: IKeyStore::Latch"
+    , ""
+    , "This is a quality-of-life tool to help determine which slot indices"
+    , "to use with 'llvm_bind_method' when verifying code with virtual"
+    , "method calls."
+    , ""
+    , "Requires 'enable_experimental'."
+    ]
+
   , prim "show_cfg"          "CFG -> String"
     (pureVal show_cfg)
     Current
