@@ -22,3 +22,6 @@ saw-core-rocq/rocq/.Makefile.rocq.d
 
 # Orchestrator runtime directory
 .pokepoke/
+
+# Git worktrees
+worktrees/
