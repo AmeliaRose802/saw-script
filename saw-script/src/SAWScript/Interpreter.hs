@@ -5623,6 +5623,22 @@ primitives = Map.fromList $
     , "Expected to be hidden by default in SAW 1.6."
     ]
 
+  , prim "llvm_bind_method"
+    "LLVMValue -> Int -> LLVMSpec -> LLVMSetup ()"
+    (pureVal llvm_bind_method)
+    Experimental
+    [ "Bind a virtual method override for indirect calls through a vtable."
+    , ""
+    , "The first argument is a setup value representing the object pointer."
+    , "The second argument is the vtable slot index (zero-based)."
+    , "The third argument is a proved specification (from 'llvm_verify')"
+    , "to use as the override for the virtual method at that slot."
+    , ""
+    , "NOTE: This command is not yet implemented. It will fail with an"
+    , "error if used. It is reserved for future support of C++ virtual"
+    , "dispatch override during symbolic execution."
+    ]
+
   , prim "llvm_fresh_expanded_val" "LLVMType -> LLVMSetup LLVMValue"
     (pureVal llvm_fresh_expanded_val)
     Current
