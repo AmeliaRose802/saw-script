@@ -19,3 +19,6 @@ cabal.project.freeze
 *#
 .#*
 saw-core-rocq/rocq/.Makefile.rocq.d
+
+# Orchestrator runtime directory
+.pokepoke/
