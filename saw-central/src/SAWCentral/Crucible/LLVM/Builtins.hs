@@ -1287,6 +1287,11 @@ registerVtableOverrides opts cc simCtx _top_loc mdMap mspec funcLemmas allocEnv 
               halloc = Crucible.simHandleAllocator simCtx
               ptrBytes = Crucible.toBytes (natValue ?ptrWidth `div` 8)
               ptrStorTy = Crucible.bitvectorType ptrBytes
+              -- Use pointer alignment from the data layout (typically 8-byte
+              -- for 64-bit targets). LLVM IR loads from vtable pointers use
+              -- `align 8`, so allocations must match or isAllocated fails.
+              dl = Crucible.llvmDataLayout ?lc
+              ptrAlignment = dl ^. Crucible.ptrAlign
 
           for_ vtableBindings $ \vb ->
             do let methodName = vtableBindMethodName vb
@@ -1369,7 +1374,7 @@ registerVtableOverrides opts cc simCtx _top_loc mdMap mspec funcLemmas allocEnv 
                         W4.bvLit sym ?ptrWidth (Crucible.bytesToBV ?ptrWidth ptrBytes)
                       (fnPtr', mem1) <- liftIO $
                         Crucible.doMalloc bak Crucible.HeapAlloc Crucible.Immutable
-                          "vtable_fn_ptr" mem0 ptrSzBV Crucible.noAlignment
+                          "vtable_fn_ptr" mem0 ptrSzBV ptrAlignment
                       mem2 <- liftIO $
                         Crucible.doInstallHandle bak fnPtr'
                           (Crucible.SomeFnHandle h) mem1
@@ -1380,7 +1385,7 @@ registerVtableOverrides opts cc simCtx _top_loc mdMap mspec funcLemmas allocEnv 
                         W4.bvLit sym ?ptrWidth (Crucible.bytesToBV ?ptrWidth vtableBytes)
                       (vtablePtr, mem3) <- liftIO $
                         Crucible.doMalloc bak Crucible.HeapAlloc Crucible.Immutable
-                          "vtable" mem2 vtableSzBV Crucible.noAlignment
+                          "vtable" mem2 vtableSzBV ptrAlignment
 
                       -- Compute slot address within the vtable.
                       -- For slot 0, slotAddr == vtablePtr (no offset needed).
@@ -1397,7 +1402,7 @@ registerVtableOverrides opts cc simCtx _top_loc mdMap mspec funcLemmas allocEnv 
                       -- initialization, not mutation.
                       mem4 <- liftIO $
                         Crucible.storeConstRaw bak mem3 slotAddr ptrStorTy
-                          Crucible.noAlignment
+                          ptrAlignment
                           (Crucible.ptrToPtrVal fnPtr')
 
                       -- Remove the object's block from the array-backed set.
@@ -1411,7 +1416,7 @@ registerVtableOverrides opts cc simCtx _top_loc mdMap mspec funcLemmas allocEnv 
 
                       mem5 <- liftIO $
                         Crucible.storeRaw bak mem4' objPtr ptrStorTy
-                          Crucible.noAlignment
+                          ptrAlignment
                           (Crucible.ptrToPtrVal vtablePtr)
 
                       Crucible.writeGlobal mvar mem5

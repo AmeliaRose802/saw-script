@@ -5619,7 +5619,7 @@ primitives = Map.fromList $
     , "indirect calls through the object's vtable resolve to the override:"
     , "  obj[0] -> vtable_ptr, vtable[slot] -> fn_ptr -> override handle"
     , ""
-    , "Requires 'enable_experimental' and 'enable_lax_loads_and_stores'."
+    , "Requires 'enable_experimental'."
     ]
 
   , prim "llvm_fresh_expanded_val" "LLVMType -> LLVMSetup LLVMValue"
