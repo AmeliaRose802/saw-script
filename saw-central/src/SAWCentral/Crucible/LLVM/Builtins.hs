@@ -1292,143 +1292,149 @@ registerVtableOverrides opts cc simCtx _top_loc mdMap mspec funcLemmas allocEnv 
               halloc = Crucible.simHandleAllocator simCtx
               ptrBytes = Crucible.toBytes (natValue ?ptrWidth `div` 8)
               ptrStorTy = Crucible.bitvectorType ptrBytes
-              -- Use pointer alignment from the data layout (typically 8-byte
-              -- for 64-bit targets). LLVM IR loads from vtable pointers use
-              -- `align 8`, so allocations must match or isAllocated fails.
               dl = Crucible.llvmDataLayout ?lc
               ptrAlignment = dl ^. Crucible.ptrAlign
 
-          for_ vtableBindings $ \vb ->
-            do let methodName = vtableBindMethodName vb
-                   slot = vtableBindSlot vb
+          -- Group bindings by object allocation index so we create
+          -- one vtable per object with all slots populated.
+          let groupByObj = Map.fromListWith (++)
+                [ (idx, [vb])
+                | vb <- vtableBindings
+                , SetupVar idx <- [vtableBindObject vb]
+                ]
 
-               -- Find matching lemma specs by method name
-               let matchingSpecs =
-                     filter (\s -> view csName s == methodName) funcLemmas
-               specs <- case NE.nonEmpty matchingSpecs of
-                 Nothing -> fail $ unwords
-                   [ "llvm_bind_method: no lemma found for"
-                   , "`" ++ Text.unpack methodName ++ "`."
-                   , "Ensure it is passed in the lemmas list to llvm_verify."
-                   ]
-                 Just ne -> return ne
-
-               -- Resolve object pointer from the allocation environment
-               objPtr <- case vtableBindObject vb of
-                 SetupVar idx ->
-                   case Map.lookup idx allocEnv of
+          for_ (Map.toList groupByObj) $ \(objIdx, vbs) ->
+            do -- Resolve object pointer
+               objPtr <- case Map.lookup objIdx allocEnv of
                      Just p -> return p
                      Nothing -> fail $ unwords
                        [ "llvm_bind_method: allocation index"
-                       , show idx
+                       , show objIdx
                        , "not found in environment."
                        ]
-                 _ -> fail $ unwords
-                   [ "llvm_bind_method: object must be an llvm_alloc'd pointer,"
-                   , "not a complex setup expression."
-                   ]
 
-               -- Get the declaration (or synthesize one) and create override
-               let fsym = L.Symbol (Text.unpack methodName)
-                   matchDecl dec = matchingStatics (L.decName dec) fsym
-                   allDecls = Crucible.allModuleDeclares (ccLLVMModuleAST cc)
-                   -- Build synthetic declaration if needed
-                   getDecl = case filter matchDecl allDecls of
-                     (d:_) -> Right d
-                     [] -> case find (\s -> view csName s == methodName) funcLemmas of
-                       Just spec ->
-                         let nArgs = length (spec ^. MS.csArgBindings)
-                             ptrTy = L.PtrTo (L.PrimType (L.Integer 8))
-                             retTy = case spec ^. MS.csRet of
-                               Nothing -> L.PrimType L.Void
-                               Just _mt -> L.PrimType (L.Integer 32)
-                         in Right L.Declare
-                             { L.decLinkage = Nothing
-                             , L.decVisibility = Nothing
-                             , L.decRetType = retTy
-                             , L.decName = fsym
-                             , L.decArgs = replicate nArgs ptrTy
-                             , L.decVarArgs = False
-                             , L.decAttrs = []
-                             , L.decComdat = mempty
-                             }
-                       Nothing -> Left $ unwords
-                         [ "llvm_bind_method: no LLVM declaration or lemma for"
-                         , "`" ++ Text.unpack methodName ++ "`."
-                         ]
-               case getDecl of
-                 Left err -> fail err
-                 Right decl ->
-                   Crucible.llvmDeclToFunHandleRepr' decl $ \argTypes retType ->
-                   do sc <- saw_sc <$> liftIO (Common.sawCoreState sym)
-                      let fn_name = W4.functionNameFromText methodName
+               -- Find max slot to size the vtable
+               let maxSlot = maximum (map vtableBindSlot vbs)
 
-                      h <- liftIO $ Crucible.mkHandle' halloc fn_name argTypes retType
-                      Crucible.bindFnHandle h
-                        $ Crucible.UseOverride
-                        $ Crucible.mkOverride' fn_name retType
-                        $ methodSpecHandler opts sc cc mdMap specs h
+               -- Allocate one vtable for all slots on this object
+               mem0 <- Crucible.readGlobal mvar
+               let vtableBytes = Crucible.toBytes
+                     (fromIntegral (maxSlot + 1) * Crucible.bytesToInteger ptrBytes)
+               vtableSzBV <- liftIO $
+                 W4.bvLit sym ?ptrWidth (Crucible.bytesToBV ?ptrWidth vtableBytes)
+               (vtablePtr, mem1) <- liftIO $
+                 Crucible.doMalloc bak Crucible.HeapAlloc Crucible.Immutable
+                   "vtable" mem0 vtableSzBV ptrAlignment
 
-                      liftIO $ printOutLn opts Info $ unwords
-                        [ "  vtable override: slot"
-                        , show slot, "->", "`" ++ Text.unpack methodName ++ "`"
+               -- Populate each slot in the shared vtable
+               mem_final <- foldM (\mem_acc vb ->
+                 do let methodName = vtableBindMethodName vb
+                        slot = vtableBindSlot vb
+
+                    -- Find matching lemma specs
+                    let matchingSpecs =
+                          filter (\s -> view csName s == methodName) funcLemmas
+                    specs <- case NE.nonEmpty matchingSpecs of
+                      Nothing -> fail $ unwords
+                        [ "llvm_bind_method: no lemma found for"
+                        , "`" ++ Text.unpack methodName ++ "`."
+                        , "Ensure it is passed in the lemmas list to llvm_verify."
                         ]
+                      Just ne -> return ne
 
-                      mem0 <- Crucible.readGlobal mvar
-                      ptrSzBV <- liftIO $
-                        W4.bvLit sym ?ptrWidth (Crucible.bytesToBV ?ptrWidth ptrBytes)
-                      (fnPtr', mem1) <- liftIO $
-                        Crucible.doMalloc bak Crucible.HeapAlloc Crucible.Immutable
-                          "vtable_fn_ptr" mem0 ptrSzBV ptrAlignment
-                      mem2 <- liftIO $
-                        Crucible.doInstallHandle bak fnPtr'
-                          (Crucible.SomeFnHandle h) mem1
+                    -- Get declaration and create override
+                    let fsym = L.Symbol (Text.unpack methodName)
+                        matchDecl dec = matchingStatics (L.decName dec) fsym
+                        allDecls = Crucible.allModuleDeclares (ccLLVMModuleAST cc)
+                        getDecl = case filter matchDecl allDecls of
+                          (d:_) -> Right d
+                          [] -> case find (\s -> view csName s == methodName) funcLemmas of
+                            Just spec ->
+                              let nArgs = length (spec ^. MS.csArgBindings)
+                                  ptrTy = L.PtrTo (L.PrimType (L.Integer 8))
+                                  retTy = case spec ^. MS.csRet of
+                                    Nothing -> L.PrimType L.Void
+                                    Just _mt -> L.PrimType (L.Integer 32)
+                              in Right L.Declare
+                                  { L.decLinkage = Nothing
+                                  , L.decVisibility = Nothing
+                                  , L.decRetType = retTy
+                                  , L.decName = fsym
+                                  , L.decArgs = replicate nArgs ptrTy
+                                  , L.decVarArgs = False
+                                  , L.decAttrs = []
+                                  , L.decComdat = mempty
+                                  }
+                            Nothing -> Left $ unwords
+                              [ "llvm_bind_method: no LLVM declaration or lemma for"
+                              , "`" ++ Text.unpack methodName ++ "`."
+                              ]
+                    case getDecl of
+                      Left err -> fail err
+                      Right decl ->
+                        Crucible.llvmDeclToFunHandleRepr' decl $ \argTypes retType ->
+                        do let st = sawCoreState sym
+                               sc = saw_sc st
+                           let fn_name = W4.functionNameFromText methodName
 
-                      let vtableBytes = Crucible.toBytes
-                            (fromIntegral (slot + 1) * Crucible.bytesToInteger ptrBytes)
-                      vtableSzBV <- liftIO $
-                        W4.bvLit sym ?ptrWidth (Crucible.bytesToBV ?ptrWidth vtableBytes)
-                      (vtablePtr, mem3) <- liftIO $
-                        Crucible.doMalloc bak Crucible.HeapAlloc Crucible.Immutable
-                          "vtable" mem2 vtableSzBV ptrAlignment
+                           h <- liftIO $ Crucible.mkHandle' halloc fn_name argTypes retType
+                           Crucible.bindFnHandle h
+                             $ Crucible.UseOverride
+                             $ Crucible.mkOverride' fn_name retType
+                             $ methodSpecHandler opts sc cc mdMap specs h
 
-                      -- Compute slot address within the vtable.
-                      -- For slot 0, slotAddr == vtablePtr (no offset needed).
-                      slotAddr <-
-                        if slot == 0 then return vtablePtr
-                        else do
-                          let slotByteOff = Crucible.toBytes
-                                (fromIntegral slot * Crucible.bytesToInteger ptrBytes)
-                          slotOffBV <- liftIO $
-                            W4.bvLit sym ?ptrWidth (Crucible.bytesToBV ?ptrWidth slotByteOff)
-                          liftIO $ Crucible.doPtrAddOffset bak mem3 vtablePtr slotOffBV
-                      -- Use storeConstRaw to write to Immutable allocations.
-                      -- The vtable is conceptually constant — these writes are
-                      -- initialization, not mutation.
-                      mem4 <- liftIO $
-                        Crucible.storeConstRaw bak mem3 slotAddr ptrStorTy
-                          ptrAlignment
-                          (Crucible.ptrToPtrVal fnPtr')
+                           liftIO $ printOutLn opts Info $ unwords
+                             [ "  vtable override: slot"
+                             , show slot, "->", "`" ++ Text.unpack methodName ++ "`"
+                             ]
 
-                      -- Remove the object's block from the array-backed set.
-                      -- SAW's pre-state setup may mark allocations as array-
-                      -- backed, but the array read path loses pointer provenance
-                      -- (block numbers). Since we're writing a pointer value
-                      -- (vtablePtr) here, we need reads to use the write-log
-                      -- path which preserves provenance.
-                      let (objBlk, _) = Crucible.llvmPointerView objPtr
-                          mem4' = mem4
-                            { Crucible.memImplHeap =
-                                Crucible.memRemoveArrayBlock objBlk
-                                  (Crucible.memImplHeap mem4)
-                            }
+                           -- Allocate fn_ptr and install handle
+                           ptrSzBV <- liftIO $
+                             W4.bvLit sym ?ptrWidth (Crucible.bytesToBV ?ptrWidth ptrBytes)
+                           (fnPtr', memA) <- liftIO $
+                             Crucible.doMalloc bak Crucible.HeapAlloc Crucible.Immutable
+                               "vtable_fn_ptr" mem_acc ptrSzBV ptrAlignment
+                           memB <- liftIO $
+                             Crucible.doInstallHandle bak fnPtr'
+                               (Crucible.SomeFnHandle h) memA
 
-                      mem5 <- liftIO $
-                        Crucible.storeRaw bak mem4' objPtr ptrStorTy
-                          ptrAlignment
-                          (Crucible.ptrToPtrVal vtablePtr)
+                           -- Write fn_ptr at vtable[slot]
+                           slotAddr <-
+                             if slot == 0 then return vtablePtr
+                             else do
+                               let slotByteOff = Crucible.toBytes
+                                     (fromIntegral slot * Crucible.bytesToInteger ptrBytes)
+                               slotOffBV <- liftIO $
+                                 W4.bvLit sym ?ptrWidth (Crucible.bytesToBV ?ptrWidth slotByteOff)
+                               liftIO $ Crucible.doPtrAddOffset bak memB vtablePtr slotOffBV
+                           memC <- liftIO $
+                             Crucible.storeConstRaw bak memB slotAddr ptrStorTy
+                               ptrAlignment
+                               (Crucible.ptrToPtrVal fnPtr')
 
-                      Crucible.writeGlobal mvar mem5
+                           return memC
+                 ) mem1 vbs
+
+               -- Write vtable pointer at obj[0] ONCE for all slots.
+               -- Remove both the object block and the vtable block from
+               -- memArrayBlocks so the SMT array fast-path does not
+               -- reconstruct loaded pointers with block 0 (which would
+               -- destroy function-handle provenance on vtable reads).
+               let (objBlk, _) = Crucible.llvmPointerView objPtr
+                   (vtableBlk, _) = Crucible.llvmPointerView vtablePtr
+                   mem_final' = mem_final
+                     { Crucible.memImplHeap =
+                         Crucible.memRemoveArrayBlock objBlk $
+                         Crucible.memRemoveArrayBlock vtableBlk $
+                           Crucible.memImplHeap mem_final
+                     }
+
+               mem_done <- liftIO $
+                 Crucible.storeConstRaw bak mem_final' objPtr ptrStorTy
+                   ptrAlignment
+                   (Crucible.ptrToPtrVal vtablePtr)
+
+               Crucible.writeGlobal mvar mem_done
 
 registerInvariantOverride ::
   ( ?lc :: Crucible.TypeContext
