@@ -1,0 +1,158 @@
+/*
+ * Cryptol specifications for std::string operations on the flat byte-array
+ * model from StringModel.cry.
+ *
+ * These specs operate on raw (buf, len) pairs rather than the StringModel
+ * record so that SAW overrides can pass individual terms directly.
+ *
+ * Operations:
+ *   string_compare  - lexicographic comparison, returns -1/0/1 as i32
+ *   string_substr   - extract a sub-range from a buffer
+ *   string_find     - search for a byte pattern in a buffer
+ *   string_equal    - equality check (same length + matching prefix)
+ */
+module StringOps where
+
+// ---------------------------------------------------------------------------
+// string_compare
+// ---------------------------------------------------------------------------
+
+/**
+ * Lexicographic comparison of two byte arrays up to min(len1, len2).
+ *
+ * Returns:
+ *   -1 (as i32) if the first string is less,
+ *    0           if the prefixes match and lengths are equal,
+ *    1           if the first string is greater.
+ *
+ * When the prefixes of length min(len1,len2) are equal, the shorter
+ * string compares less than the longer one.
+ */
+string_compare : {n, m} (fin n, fin m, n >= 1, m >= 1) =>
+                 [n][8] -> [64] -> [m][8] -> [64] -> [32]
+string_compare buf1 len1 buf2 len2 =
+    if prefix_lt cmp_len buf1 buf2
+    then -1
+    else if prefix_lt cmp_len buf2 buf1
+         then 1
+         else if len1 < len2 then -1
+              else if len1 > len2 then 1
+                   else 0
+  where
+    cmp_len = min len1 len2
+
+/**
+ * Check whether buf_a is lexicographically less than buf_b in the first
+ * `len` bytes.  Returns True at the first index where a < b, provided
+ * all prior bytes are equal.
+ */
+private
+  prefix_lt : {k} (fin k, k >= 1) =>
+              [64] -> [k][8] -> [k][8] -> Bit
+  prefix_lt len xs ys =
+      foldl (||) False
+            [ (i < len) && all_eq_before i && (xs@i < ys@i)
+            | i <- [0 .. k-1] : [k][64]
+            ]
+    where
+      all_eq_before idx =
+          foldl (&&) True
+                [ if j < idx && j < len then xs@j == ys@j else True
+                | j <- [0 .. k-1] : [k][64]
+                ]
+
+// ---------------------------------------------------------------------------
+// string_substr
+// ---------------------------------------------------------------------------
+
+/**
+ * Extract a substring from (buf, len) starting at `pos` for up to `count`
+ * bytes.
+ *
+ * Returns (new_buf, new_len) where:
+ *   - new_len = min(count, len - pos)   if pos <= len
+ *   - new_len = 0                       if pos > len
+ *   - new_buf has the selected bytes shifted to the front; trailing
+ *     positions are zeroed.
+ *
+ * This matches std::string::substr semantics (except we clamp rather
+ * than throw on out-of-range pos, matching common SAW usage).
+ */
+string_substr : {n} (fin n, fin n) =>
+                [n][8] -> [64] -> [64] -> [64] -> ([n][8], [64])
+string_substr buf len pos count =
+    (new_buf, new_len)
+  where
+    // Clamp position to length
+    actual_pos   = if pos > len then len else pos
+    remaining    = len - actual_pos
+    actual_count = if count > remaining then remaining else count
+    new_len      = actual_count
+
+    // Build a new buffer with the substring shifted to position 0
+    new_buf = [ if i < actual_count then buf @ (actual_pos + i) else 0
+              | i <- [0 .. n-1] : [n][64]
+              ]
+
+// ---------------------------------------------------------------------------
+// string_find
+// ---------------------------------------------------------------------------
+
+/**
+ * Search for a byte pattern in a buffer, starting at position `start`.
+ *
+ * Returns the index of the first match, or npos (~0 : [64]) if no match
+ * is found.
+ *
+ * This is a brute-force scan suitable for symbolic execution with SAW/Z3.
+ */
+string_find : {n, m} (fin n, fin m, n >= 1, m >= 1) =>
+              [n][8] -> [64] -> [m][8] -> [64] -> [64] -> [64]
+string_find haystack hay_len needle ndl_len start =
+    if ndl_len == 0 then (if start <= hay_len then start else hay_len)
+    else find_first`{n} haystack hay_len needle ndl_len start
+
+private
+  npos : [64]
+  npos = ~0
+
+  /**
+   * Return the smallest index >= start where needle matches, or npos.
+   * We fold from right to left so the leftmost match wins.
+   */
+  find_first : {k} (fin k, k >= 1) =>
+               [k][8] -> [64] -> [k][8] -> [64] -> [64] -> [64]
+  find_first haystack hay_len needle ndl_len start =
+      foldl pick npos [ (i, match_at i)
+                      | i <- [0 .. k-1] : [k][64]
+                      ]
+    where
+      pick best (i, True)  = if i < best then i else best
+      pick best (_,  False) = best
+
+      match_at pos =
+          (pos >= start) && (pos + ndl_len <= hay_len) &&
+          foldl (&&) True
+                [ if j < ndl_len then haystack @ (pos + j) == needle @ j
+                  else True
+                | j <- [0 .. k-1] : [k][64]
+                ]
+
+// ---------------------------------------------------------------------------
+// string_equal
+// ---------------------------------------------------------------------------
+
+/**
+ * Equality check: two strings are equal iff they have the same length
+ * and the first `len` bytes match.
+ */
+string_equal : {n, m} (fin n, fin m, n >= 1, m >= 1) =>
+               [n][8] -> [64] -> [m][8] -> [64] -> Bit
+string_equal buf1 len1 buf2 len2 =
+    len1 == len2 && bytes_match
+  where
+    k = min n m
+    bytes_match = foldl (&&) True
+                        [ if i < len1 then buf1@i == buf2@i else True
+                        | i <- [0 .. k-1] : [k][64]
+                        ]

@@ -1,0 +1,142 @@
+/*
+ * SAW overrides for std::string operations: compare, substr, find, operator==.
+ *
+ * These overrides build on the flat (i8* buf, i64 len, i64 cap) string model
+ * from string_overrides.saw and use the Cryptol specs in StringOps.cry.
+ *
+ * Mangled names for reference:
+ *
+ * MSVC (x86-64):
+ *   compare()    ?compare@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QEBAHAEAV12@@Z
+ *   substr()     ?substr@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QEBA?AV12@_K0@Z
+ *   find()       ?find@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QEBA_KAEAV12@_K@Z
+ *   operator==   ??8std@@YA_NAEBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@0@0@Z
+ *
+ * GCC/Clang (Itanium ABI):
+ *   compare()    _ZNKSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE7compareERKS4_
+ *   substr()     _ZNKSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE6substrEmm
+ *   find()       _ZNKSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE4findERKS4_m
+ *   operator==   _ZSteqIcSt11char_traitsIcESaIcEEbRKNSt7__cxx1112basic_stringIT_T0_T1_EESA_
+ *
+ * Usage:
+ *   // Load prerequisites
+ *   include "string_overrides.saw";
+ *   include "string_ops_overrides.saw";
+ *
+ *   m <- llvm_load_module "my_program.bc";
+ *
+ *   // Register base overrides
+ *   size_ov <- llvm_verify m "<size_mangled>" [] false (string_size_override 256) z3;
+ *
+ *   // Register operation overrides
+ *   cmp_ov <- llvm_verify m "<compare_mangled>" [] false (string_compare_override 256) z3;
+ *   eq_ov  <- llvm_verify m "<eq_mangled>"      [] false (string_equal_override 256) z3;
+ *   sub_ov <- llvm_verify m "<substr_mangled>"   [] false (string_substr_override 256) z3;
+ *   find_ov <- llvm_verify m "<find_mangled>"    [] false (string_find_override 256 64) z3;
+ *
+ *   // Use compositionally
+ *   llvm_verify m "Authenticate"
+ *     [size_ov, cmp_ov, eq_ov, sub_ov, find_ov]
+ *     false authenticate_spec z3;
+ */
+
+import "StringOps.cry";
+
+// ---------------------------------------------------------------------------
+// Override: string::compare(const basic_string& str) const
+// ---------------------------------------------------------------------------
+// int compare(const basic_string& str) const;
+//   Lexicographic comparison of *this against str.
+//   Returns negative / 0 / positive as i32.
+
+let string_compare_override max_len = do {
+    lhs <- llvm_fresh_string "lhs" max_len;
+    rhs <- llvm_fresh_string "rhs" max_len;
+
+    llvm_execute_func [ lhs.this_ptr, rhs.this_ptr ];
+
+    let result = {{ string_compare`{max_len, max_len}
+                        lhs.buf lhs.len rhs.buf rhs.len }};
+    llvm_return (llvm_term result);
+};
+
+// ---------------------------------------------------------------------------
+// Override: string::substr(size_t pos, size_t count) const
+// ---------------------------------------------------------------------------
+// basic_string substr(size_t pos = 0, size_t count = npos) const;
+//   Returns a new string model containing the substring [pos, pos+count).
+//   The return value is passed via an sret pointer (first argument) on
+//   most ABIs.
+
+let string_substr_override max_len = do {
+    // sret: caller-allocated space for the returned string
+    let str_ty = llvm_struct "struct.saw_string_model";
+    ret_ptr <- llvm_alloc str_ty;
+
+    // Source string
+    src <- llvm_fresh_string "src" max_len;
+
+    // Position and count arguments
+    pos   <- llvm_fresh_var "pos"   (llvm_int 64);
+    count <- llvm_fresh_var "count" (llvm_int 64);
+
+    llvm_execute_func [ ret_ptr, src.this_ptr,
+                        llvm_term pos, llvm_term count ];
+
+    // Compute the result via Cryptol spec
+    let result = {{ string_substr`{max_len}
+                        src.buf src.len pos count }};
+
+    // Postcondition: returned string model is initialized
+    ret_buf_ptr <- llvm_alloc (llvm_array max_len (llvm_int 8));
+    llvm_points_to ret_buf_ptr (llvm_term {{ result.0 }});
+    llvm_points_to ret_ptr
+        (llvm_struct_value [ ret_buf_ptr
+                           , llvm_term {{ result.1 }}
+                           , llvm_term {{ `max_len : [64] }}
+                           ]);
+
+    llvm_return ret_ptr;
+};
+
+// ---------------------------------------------------------------------------
+// Override: string::find(const basic_string& str, size_t pos) const
+// ---------------------------------------------------------------------------
+// size_t find(const basic_string& str, size_t pos = 0) const;
+//   Searches for the first occurrence of str starting at pos.
+//   Returns the index or std::string::npos (~0).
+
+let string_find_override max_len pattern_max_len = do {
+    haystack <- llvm_fresh_string "hay" max_len;
+    needle   <- llvm_fresh_string "ndl" pattern_max_len;
+
+    start <- llvm_fresh_var "start" (llvm_int 64);
+
+    llvm_execute_func [ haystack.this_ptr, needle.this_ptr,
+                        llvm_term start ];
+
+    let result = {{ string_find`{max_len, pattern_max_len}
+                        haystack.buf haystack.len
+                        needle.buf needle.len start }};
+    llvm_return (llvm_term result);
+};
+
+// ---------------------------------------------------------------------------
+// Override: operator==(const basic_string&, const basic_string&)
+// ---------------------------------------------------------------------------
+// bool operator==(const basic_string& lhs, const basic_string& rhs);
+//   Returns true (i8 1) if the strings are equal, false (i8 0) otherwise.
+//   Note: LLVM represents bool as i8 in most ABIs.
+
+let string_equal_override max_len = do {
+    lhs <- llvm_fresh_string "lhs" max_len;
+    rhs <- llvm_fresh_string "rhs" max_len;
+
+    llvm_execute_func [ lhs.this_ptr, rhs.this_ptr ];
+
+    let result = {{ if string_equal`{max_len, max_len}
+                           lhs.buf lhs.len rhs.buf rhs.len
+                    then 1 : [8]
+                    else 0 : [8] }};
+    llvm_return (llvm_term result);
+};
