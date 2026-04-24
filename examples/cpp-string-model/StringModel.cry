@@ -1,0 +1,95 @@
+/*
+ * Cryptol specifications for a flat byte-array model of std::basic_string.
+ *
+ * The MSVC (and libstdc++/libc++) std::basic_string uses a Small String
+ * Optimization (SSO) union internally.  SAW cannot represent discriminated
+ * unions, so we replace the entire string object with a simple triple:
+ *
+ *   (buf : [n][8], len : [64], cap : [64])
+ *
+ * All SAW overrides for string methods operate on this representation.
+ */
+module StringModel where
+
+// ---------------------------------------------------------------------------
+// Core string model type
+// ---------------------------------------------------------------------------
+
+/**
+ * A string model with a buffer of at most `n` bytes.
+ *
+ *   buf - symbolic byte content (allocated to capacity `n`)
+ *   len - current logical length (number of valid characters)
+ *   cap - allocated capacity (always `n` at the Cryptol level)
+ */
+type StringModel n = { buf : [n][8], len : [64], cap : [64] }
+
+// ---------------------------------------------------------------------------
+// Validity predicates
+// ---------------------------------------------------------------------------
+
+/** A string model is valid when len <= cap and cap == buffer size. */
+valid_string : {n} (fin n) => StringModel n -> Bit
+valid_string s = s.len <= s.cap /\ s.cap == `n
+
+/** The string is empty (length zero). */
+is_empty : {n} (fin n) => StringModel n -> Bit
+is_empty s = s.len == 0
+
+// ---------------------------------------------------------------------------
+// Observers
+// ---------------------------------------------------------------------------
+
+/** Return the logical length of the string. */
+string_length : {n} (fin n) => StringModel n -> [64]
+string_length s = s.len
+
+/**
+ * Extract the "active" prefix of the buffer (the first `len` bytes).
+ * Since Cryptol sequences are fixed-width we return the full buffer;
+ * downstream specs should only inspect the first `s.len` bytes.
+ */
+string_contents : {n} (fin n) => StringModel n -> [n][8]
+string_contents s = s.buf
+
+// ---------------------------------------------------------------------------
+// Comparisons
+// ---------------------------------------------------------------------------
+
+/**
+ * Byte-wise equality of two string models.
+ *
+ * Two strings are equal when they have the same length and the first
+ * `len` bytes match.  Because Cryptol operates on fixed-width vectors
+ * we compare element-by-element up to the minimum logical length.
+ */
+string_equal : {n, m} (fin n, fin m, n >= 1, m >= 1) =>
+               StringModel n -> StringModel m -> Bit
+string_equal a b =
+    a.len == b.len /\
+    prefix_equal`{min n m} a.buf b.buf a.len
+
+/**
+ * Compare the first `len` bytes of two buffers for equality.
+ * Bytes beyond `len` are ignored (they may be symbolic garbage).
+ */
+private
+  prefix_equal : {k} (fin k, k >= 1) =>
+                 [k][8] -> [k][8] -> [64] -> Bit
+  prefix_equal xs ys len =
+      foldl (/\) True
+            [ if i < len then xs@i == ys@i else True
+            | i <- [0 .. k-1] : [k][64]
+            ]
+
+// ---------------------------------------------------------------------------
+// Constructors / mutators (for use in Cryptol-level specs)
+// ---------------------------------------------------------------------------
+
+/** Create a string model from a literal byte sequence. */
+from_bytes : {n} (fin n) => [n][8] -> StringModel n
+from_bytes bytes = { buf = bytes, len = `n, cap = `n }
+
+/** Create an empty string model with the given capacity. */
+empty_string : {n} (fin n) => StringModel n
+empty_string = { buf = zero, len = 0, cap = `n }

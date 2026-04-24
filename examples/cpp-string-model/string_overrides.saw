@@ -1,0 +1,266 @@
+/*
+ * SAW overrides for std::basic_string that replace the SSO union layout
+ * with a flat (i8* buf, i64 len, i64 cap) triple.
+ *
+ * The MSVC and libstdc++ std::basic_string uses a Small String Optimization
+ * (SSO) union: strings <= 15 chars are stored inline in a 16-byte buffer
+ * that overlaps with the heap-pointer/size/capacity fields.  SAW cannot
+ * model discriminated unions, so we override every string method at the
+ * LLVM level to operate on a simple byte-array model instead.
+ *
+ * Typical MSVC mangled names (x86-64):
+ *   size()       ?size@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QEBA_KXZ
+ *   c_str()      ?c_str@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QEBAPEBDXZ
+ *   data()       ?data@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QEBAPEBDXZ
+ *   _Construct   (internal, inlined in most builds)
+ *   assign       ?assign@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QEAAAEAV12@PEBD_K@Z
+ *   ~basic_string (destructor) ??1?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QEAA@XZ
+ *
+ * GCC/Clang (Itanium ABI) mangled names:
+ *   size()       _ZNKSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE4sizeEv
+ *   c_str()      _ZNKSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE5c_strEv
+ *   data()       _ZNKSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE4dataEv
+ *   assign       _ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE6assignEPKcm
+ *   ~basic_string _ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEED1Ev
+ *
+ * Usage:
+ *   1. Load this file in your verification script.
+ *   2. Call llvm_fresh_string to create symbolic string values.
+ *   3. Use the override specs with llvm_verify to intercept string methods.
+ */
+
+import "StringModel.cry";
+
+// ---------------------------------------------------------------------------
+// Type aliases
+// ---------------------------------------------------------------------------
+
+let i8  = llvm_int 8;
+let i32 = llvm_int 32;
+let i64 = llvm_int 64;
+
+// ---------------------------------------------------------------------------
+// Helper: allocate and initialise a value behind a pointer
+// ---------------------------------------------------------------------------
+
+let alloc_init ty v = do {
+    p <- llvm_alloc ty;
+    llvm_points_to p v;
+    return p;
+};
+
+let ptr_to_fresh name ty = do {
+    x <- llvm_fresh_var name ty;
+    p <- alloc_init ty (llvm_term x);
+    return (x, p);
+};
+
+// ---------------------------------------------------------------------------
+// llvm_fresh_string : the main helper for verification scripts
+// ---------------------------------------------------------------------------
+
+/**
+ * Allocate a fresh symbolic string of up to `max_len` bytes.
+ *
+ * Returns a record with:
+ *   buf_ptr  - pointer to the i8 array (length max_len)
+ *   buf      - symbolic Cryptol term for the byte content
+ *   len      - symbolic i64 length term
+ *   len_ptr  - pointer to the i64 length
+ *   cap      - symbolic i64 capacity term
+ *   cap_ptr  - pointer to the i64 capacity
+ *   this_ptr - pointer to a struct { i8*, i64, i64 } representing the string
+ *
+ * A precondition len <= cap is asserted via llvm_precond.
+ *
+ * Example:
+ *   s <- llvm_fresh_string "input" 256;
+ *   llvm_execute_func [ s.this_ptr ];
+ */
+let llvm_fresh_string name max_len = do {
+    // 1. Allocate the byte buffer
+    (buf, buf_ptr) <- ptr_to_fresh (str_concat name "_buf")
+                                   (llvm_array max_len i8);
+
+    // 2. Allocate length and capacity
+    len <- llvm_fresh_var (str_concat name "_len") i64;
+    cap <- llvm_fresh_var (str_concat name "_cap") i64;
+
+    // 3. Preconditions: 0 <= len <= cap <= max_len
+    llvm_precond {{ len <= cap }};
+    llvm_precond {{ cap <= `max_len }};
+
+    // 4. Build the "this" struct: { i8*, i64, i64 }
+    let str_ty = llvm_struct "struct.saw_string_model";
+    this_ptr <- llvm_alloc str_ty;
+    llvm_points_to this_ptr
+        (llvm_struct_value [ buf_ptr
+                           , llvm_term len
+                           , llvm_term cap
+                           ]);
+
+    return { buf_ptr  = buf_ptr
+           , buf      = buf
+           , len      = len
+           , len_ptr  = this_ptr   // not separate; embedded in struct
+           , cap      = cap
+           , cap_ptr  = this_ptr
+           , this_ptr = this_ptr
+           };
+};
+
+/**
+ * Simplified variant: allocate a fresh string and return just the this_ptr
+ * and the Cryptol terms, using a plain packed struct (no named LLVM type).
+ *
+ * This version works when the bitcode does not define struct.saw_string_model;
+ * it builds the struct type inline.
+ */
+let llvm_fresh_string_packed name max_len = do {
+    // Byte buffer
+    (buf, buf_ptr) <- ptr_to_fresh (str_concat name "_buf")
+                                   (llvm_array max_len i8);
+
+    // Length and capacity
+    len <- llvm_fresh_var (str_concat name "_len") i64;
+    cap <- llvm_fresh_var (str_concat name "_cap") i64;
+
+    llvm_precond {{ len <= cap }};
+    llvm_precond {{ cap <= `max_len }};
+
+    // Packed struct: { i8*, i64, i64 }
+    let str_ty = llvm_packed_struct_type [llvm_type "i8*", i64, i64];
+    this_ptr <- llvm_alloc str_ty;
+    llvm_points_to this_ptr
+        (llvm_packed_struct_value [ buf_ptr
+                                 , llvm_term len
+                                 , llvm_term cap
+                                 ]);
+
+    return { buf_ptr  = buf_ptr
+           , buf      = buf
+           , len      = len
+           , cap      = cap
+           , this_ptr = this_ptr
+           };
+};
+
+// ---------------------------------------------------------------------------
+// Override: string::size()  /  string::length()
+// ---------------------------------------------------------------------------
+// size_t size() const;
+//   "this" points to our (buf, len, cap) triple → return len.
+
+let string_size_override max_len = do {
+    s <- llvm_fresh_string "s" max_len;
+    llvm_execute_func [ s.this_ptr ];
+    llvm_return (llvm_term s.len);
+};
+
+// ---------------------------------------------------------------------------
+// Override: string::data()  /  string::c_str()
+// ---------------------------------------------------------------------------
+// const char* data() const;
+//   Returns the pointer to the byte buffer.
+
+let string_data_override max_len = do {
+    s <- llvm_fresh_string "s" max_len;
+    llvm_execute_func [ s.this_ptr ];
+    llvm_return s.buf_ptr;
+};
+
+let string_c_str_override max_len = string_data_override max_len;
+
+// ---------------------------------------------------------------------------
+// Override: basic_string constructor (from const char* + length)
+// ---------------------------------------------------------------------------
+// basic_string(const char* src, size_t count);
+//   Initializes the model triple from an external byte buffer.
+
+let string_construct_override max_len = do {
+    // The destination "this" pointer (uninitialized string)
+    let str_ty = llvm_struct "struct.saw_string_model";
+    this_ptr <- llvm_alloc str_ty;
+
+    // Source buffer and length
+    (src, src_ptr) <- ptr_to_fresh "src" (llvm_array max_len i8);
+    count <- llvm_fresh_var "count" i64;
+    llvm_precond {{ count <= `max_len }};
+
+    llvm_execute_func [ this_ptr, src_ptr, llvm_term count ];
+
+    // Postcondition: this is now initialized with src content
+    dst_buf_ptr <- llvm_alloc (llvm_array max_len i8);
+    llvm_points_to dst_buf_ptr (llvm_term src);
+    llvm_points_to this_ptr
+        (llvm_struct_value [ dst_buf_ptr
+                           , llvm_term count
+                           , llvm_term {{ `max_len : [64] }}
+                           ]);
+
+    // Return this (some ABIs return *this from constructors)
+    llvm_return this_ptr;
+};
+
+// ---------------------------------------------------------------------------
+// Override: basic_string::assign(const char* s, size_t count)
+// ---------------------------------------------------------------------------
+// basic_string& assign(const char* s, size_t count);
+//   Replaces the string content with count bytes from s.
+
+let string_assign_override max_len = do {
+    s <- llvm_fresh_string "dst" max_len;
+
+    // New content
+    (src, src_ptr) <- ptr_to_fresh "src" (llvm_array max_len i8);
+    count <- llvm_fresh_var "count" i64;
+    llvm_precond {{ count <= `max_len }};
+
+    llvm_execute_func [ s.this_ptr, src_ptr, llvm_term count ];
+
+    // Postcondition: buffer updated, length set to count
+    llvm_points_to s.buf_ptr (llvm_term src);
+    llvm_points_to s.this_ptr
+        (llvm_struct_value [ s.buf_ptr
+                           , llvm_term count
+                           , llvm_term s.cap
+                           ]);
+
+    // assign returns *this
+    llvm_return s.this_ptr;
+};
+
+// ---------------------------------------------------------------------------
+// Override: basic_string destructor (~basic_string)
+// ---------------------------------------------------------------------------
+// ~basic_string();
+//   No-op in SAW - symbolic memory does not need explicit deallocation.
+
+let string_tidy_override max_len = do {
+    s <- llvm_fresh_string "s" max_len;
+    llvm_execute_func [ s.this_ptr ];
+    // No postconditions - destructor is a no-op in the model.
+};
+
+// ---------------------------------------------------------------------------
+// Convenience: register all overrides against an LLVM module
+// ---------------------------------------------------------------------------
+
+/**
+ * Example usage in a verification script:
+ *
+ *   m <- llvm_load_module "my_program.bc";
+ *
+ *   // Register string overrides (adjust mangled names to match your bitcode)
+ *   size_ov  <- llvm_verify m "?size@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QEBA_KXZ"
+ *                [] false (string_size_override 256) z3;
+ *   data_ov  <- llvm_verify m "?data@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QEBAPEBDXZ"
+ *                [] false (string_data_override 256) z3;
+ *   dtor_ov  <- llvm_verify m "??1?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QEAA@XZ"
+ *                [] false (string_tidy_override 256) z3;
+ *
+ *   // Then use these as compositional overrides:
+ *   llvm_verify m "my_function"
+ *     [size_ov, data_ov, dtor_ov]
+ *     false my_function_spec z3;
+ */
