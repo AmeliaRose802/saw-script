@@ -21,7 +21,8 @@ module SAWCentral.LLVMBuiltins (
       llvm_packed_struct_type,
       llvm_pointer,
       llvm_struct_type,
-      llvm_vtable_slots
+      llvm_vtable_slots,
+      llvm_subclasses
   ) where
 
 import Data.String
@@ -31,6 +32,7 @@ import Data.Parameterized.Some
 import Control.Monad (unless, forM_)
 import Control.Monad.State (gets)
 import Data.List (isPrefixOf)
+import qualified Data.Map.Strict as Map
 
 
 import qualified Text.LLVM.AST as LLVM
@@ -215,3 +217,151 @@ describeValue val = case val of
   
   -- Metadata or other
   _ -> "?"
+
+-- ---------------------------------------------------------------------------
+-- Subclass enumeration via RTTI typeinfo structures
+-- ---------------------------------------------------------------------------
+
+-- | Enumerate all concrete subclasses of a base class by inspecting RTTI
+-- typeinfo structures in the LLVM module.
+--
+-- The Itanium C++ ABI emits typeinfo globals with @_ZTI@ prefixes.
+-- Single-inheritance typeinfo (@__si_class_type_info@) has a pointer to the
+-- parent typeinfo at field index 2, allowing us to reconstruct the
+-- inheritance graph.
+--
+-- Example:
+--
+-- > subs <- llvm_subclasses m "Shape"
+-- > -- subs = ["Circle", "Rectangle"]
+llvm_subclasses :: Some CMS.LLVMModule -> Text -> TopLevel [String]
+llvm_subclasses (Some llvmMod) baseClassText = do
+  let baseClass = Text.unpack baseClassText
+      ast       = CMS.modAST llvmMod
+      globals   = LLVM.modGlobals ast
+
+      -- Step 1: Collect all _ZTI globals and extract class name + parent name
+      typeinfoEntries = concatMap extractTypeinfoEntry globals
+
+      -- Step 2: Build parent -> [child] map
+      childMap = buildChildMap typeinfoEntries
+
+      -- Step 3: Transitively collect all descendants of baseClass
+      descendants = collectDescendants childMap baseClass
+
+  if null descendants
+    then do
+      printOutLnTop Info $ "No subclasses found for: " ++ baseClass
+      return []
+    else do
+      forM_ descendants $ \cls ->
+        printOutLnTop Info $ "  subclass: " ++ cls
+      return descendants
+
+-- | A typeinfo entry: (className, Maybe parentClassName).
+type TypeinfoEntry = (String, Maybe String)
+
+-- | Extract a typeinfo entry from an LLVM global if it has a @_ZTI@ prefix.
+--
+-- For single-inheritance (@__si_class_type_info@), the initializer is a
+-- struct with three pointer-sized fields:
+--   { vtable-ptr-for-type-info-kind, name-string-ptr, parent-typeinfo-ptr }
+--
+-- We extract the class name from the symbol (demangling the length-prefixed
+-- name embedded in the @_ZTI@ symbol) and the parent from field 2.
+extractTypeinfoEntry :: LLVM.Global -> [TypeinfoEntry]
+extractTypeinfoEntry global =
+  let name = show (LLVM.globalSym global)
+  in case stripPrefix "_ZTI" name of
+       Nothing -> []
+       Just mangled ->
+         let className   = demangleClassName mangled
+             parentName  = case LLVM.globalValue global of
+                             Just val -> extractParentFromTypeinfo val
+                             Nothing  -> Nothing
+         in [(className, parentName)]
+  where
+    stripPrefix pfx str
+      | pfx `isPrefixOf` str = Just (drop (length pfx) str)
+      | otherwise             = Nothing
+
+-- | Demangle an Itanium-style length-prefixed class name.
+-- E.g. "6Circle" -> "Circle", "9Rectangle" -> "Rectangle".
+-- For nested names (N prefix), we take a simplified approach.
+demangleClassName :: String -> String
+demangleClassName ('N':rest) = demangleNested rest
+demangleClassName s =
+  let (digits, remainder) = span isDigit s
+  in case digits of
+       [] -> s  -- fallback: return as-is
+       _  -> let n = read digits :: Int
+             in take n remainder
+  where
+    isDigit c = c >= '0' && c <= '9'
+
+-- | Handle nested names (N...E): extract the last component.
+demangleNested :: String -> String
+demangleNested = go ""
+  where
+    go acc [] = acc
+    go _   ('E':_) = ""  -- shouldn't happen with valid names
+    go _   s =
+      let (digits, rest) = span isDigit s
+      in case digits of
+           [] -> s  -- malformed, return remainder
+           _  -> let n = read digits :: Int
+                     component = take n rest
+                     rest' = drop n rest
+                 in case rest' of
+                      ('E':_) -> component  -- last component before 'E'
+                      _       -> go component rest'
+    isDigit c = c >= '0' && c <= '9'
+
+-- | Extract the parent class name from a typeinfo initializer value.
+-- In single-inheritance typeinfo, the parent typeinfo pointer is the
+-- third field (index 2) of the struct initializer.
+extractParentFromTypeinfo :: LLVM.Value -> Maybe String
+extractParentFromTypeinfo val = case val of
+  LLVM.ValStruct fields
+    | length fields >= 3 ->
+      let LLVM.Typed _ parentVal = fields !! 2
+      in resolveTypeinfoRef parentVal
+  LLVM.ValPackedStruct fields
+    | length fields >= 3 ->
+      let LLVM.Typed _ parentVal = fields !! 2
+      in resolveTypeinfoRef parentVal
+  _ -> Nothing
+
+-- | Resolve a reference to a typeinfo global back to a class name.
+-- The parent pointer is typically @_ZTI<name>@ or a bitcast thereof.
+resolveTypeinfoRef :: LLVM.Value -> Maybe String
+resolveTypeinfoRef val = case val of
+  LLVM.ValSymbol sym ->
+    let s = show sym
+    in case stripZTI s of
+         Just mangled -> Just (demangleClassName mangled)
+         Nothing      -> Nothing
+  LLVM.ValConstExpr (LLVM.ConstConv LLVM.BitCast (LLVM.Typed _ inner) _) ->
+    resolveTypeinfoRef inner
+  _ -> Nothing
+  where
+    stripZTI s
+      | "_ZTI" `isPrefixOf` s = Just (drop 4 s)
+      | otherwise              = Nothing
+
+-- | Build a map from parent class name to list of direct children.
+buildChildMap :: [TypeinfoEntry] -> Map.Map String [String]
+buildChildMap entries =
+  foldl addEntry Map.empty entries
+  where
+    addEntry m (child, Just parent) =
+      Map.insertWith (++) parent [child] m
+    addEntry m (_, Nothing) = m
+
+-- | Transitively collect all descendants of a class.
+collectDescendants :: Map.Map String [String] -> String -> [String]
+collectDescendants childMap root =
+  case Map.lookup root childMap of
+    Nothing -> []
+    Just directChildren ->
+      directChildren ++ concatMap (collectDescendants childMap) directChildren
