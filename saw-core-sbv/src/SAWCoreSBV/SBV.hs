@@ -815,7 +815,9 @@ newVars nm fot =
          (labels, vals) <- V.unzip <$> V.generateM (fromIntegral n) f
          pure (VecLabel tp labels, VVector <$> traverse (fmap ready) vals)
     FOTArray{} ->
-      fail "FOTArray unimplemented for backend"
+      fail $ "FOTArray is not supported by the SBV backend (used by the z3, cvc4, cvc5, "
+          ++ "yices, and abc proof tactics). Use a What4-based tactic such as "
+          ++ "w4_unint_z3 instead, which supports arrays."
     FOTTuple ts ->
       do let f i t = newVars (nm ++ "." ++ show i) t
          (labels, vals) <- V.unzip <$> V.imapM f (V.fromList ts)
@@ -897,7 +899,9 @@ newCodeGenVars checkSz (FOTVec n (FOTVec m FOTBit))
 newCodeGenVars checkSz (FOTVec n tp) = do
   vals <- V.replicateM (fromIntegral n) (newCodeGenVars checkSz tp)
   return (VVector <$> traverse (fmap ready) vals)
-newCodeGenVars _ (FOTArray{}) = fail "FOTArray unimplemented for backend"
+newCodeGenVars _ (FOTArray{}) =
+  fail $ "FOTArray is not supported by the SBV backend for code generation. "
+      ++ "Use a What4-based tactic such as w4_unint_z3 instead, which supports arrays."
 newCodeGenVars checkSz (FOTTuple ts) = do
   vals <- traverse (newCodeGenVars checkSz) ts
   return (vTuple <$> traverse (fmap ready) vals)
