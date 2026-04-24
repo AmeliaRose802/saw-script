@@ -1,0 +1,332 @@
+/*
+ * End-to-end SAW verification script for RequestValidator::Authenticate.
+ *
+ * This script composes all the override layers built in earlier issues:
+ *   - String SSO model overrides    (165.1: string_overrides.saw)
+ *   - String operation overrides    (165.2: string_ops_overrides.saw)
+ *   - Crypto overrides              (165.3: crypto_overrides.saw)
+ *   - Chrono/time overrides         (165.4: chrono_overrides.saw)
+ *
+ * Together they let SAW symbolically execute the C++ Authenticate method
+ * end-to-end, replacing every platform-dependent operation with a
+ * Cryptol-level specification.
+ *
+ * === How to generate the bitcode ===
+ *
+ * Compile your C++ source to LLVM bitcode with:
+ *
+ *   clang++ -std=c++17 -emit-llvm -c -g -O1 \
+ *       -fno-exceptions -fno-rtti \
+ *       -o authenticate.bc \
+ *       request_validator.cpp
+ *
+ * Use -O1 (not -O0) so that trivial inline wrappers are eliminated, but
+ * the overall control flow is preserved.  -fno-exceptions avoids landing
+ * pads that SAW cannot model.
+ *
+ * After generating the bitcode, update the llvm_load_module path below
+ * and replace every "<MANGLED_...>" placeholder with the actual mangled
+ * symbol from your bitcode.  Run `llvm-nm authenticate.bc` to list them.
+ *
+ * === Running the verification ===
+ *
+ *   export CRYPTOLPATH="examples/cpp-string-model:examples/cpp-crypto-overrides:deps/cryptol-specs/Primitive"
+ *   saw examples/cpp-string-model/authenticate_verify.saw
+ */
+
+// =========================================================================
+// Section 1: Import the Cryptol top-level spec
+// =========================================================================
+
+import "AuthenticateSpec.cry";
+
+// =========================================================================
+// Section 2: Include SAW override definitions
+// =========================================================================
+// Each file defines `let` bindings for override specs; they do not
+// execute anything on their own.
+
+include "string_overrides.saw";
+include "string_ops_overrides.saw";
+include "chrono_overrides.saw";
+
+// The crypto overrides live in a sibling directory.  Adjust the path
+// if your working directory differs.
+include "../cpp-crypto-overrides/crypto_overrides.saw";
+
+// =========================================================================
+// Section 3: Configuration constants
+// =========================================================================
+
+// Maximum byte length for string buffers in the verification model.
+// Must match the MaxTokenLen / MaxKeyLen type synonyms in AuthenticateSpec.cry.
+let MAX_TOKEN_LEN = 512;
+let MAX_KEY_LEN   = 64;
+
+// HMAC-SHA256 key size used for this verification instance.
+// Adjust to match your application's key length.
+let HMAC_KEY_LEN  = 32;
+
+// Message length for HMAC (upper bound on "header.payload" portion).
+let HMAC_MSG_LEN  = 448;
+
+// Base64-encoded signature length (32-byte MAC -> 44 base64 chars).
+let SIG_ENC_LEN   = 44;
+
+// Pattern length limit for string::find needle argument.
+let PATTERN_MAX   = 64;
+
+// =========================================================================
+// Section 4: Load the LLVM bitcode module
+// =========================================================================
+
+print "Loading bitcode module...";
+
+// TODO: Replace with the path to your compiled bitcode.
+// m <- llvm_load_module "authenticate.bc";
+
+// For development / demonstration we use llvm_load_module on a placeholder.
+// Uncomment the line above and comment out this block when real bitcode
+// is available.
+print "(Skipping llvm_load_module — no bitcode file present.)";
+print "The remainder of this script defines all specs and override";
+print "registrations.  Uncomment the llvm_load_module call and the";
+print "llvm_verify / llvm_unsafe_assume_spec calls to run verification.";
+
+// =========================================================================
+// Section 5: Register base string model overrides (165.1)
+// =========================================================================
+// These intercept std::string methods so SAW sees the flat (buf, len, cap)
+// model instead of the SSO union.
+
+/*
+size_ov <- llvm_verify m "<MANGLED_string_size>"
+    [] false
+    (string_size_override MAX_TOKEN_LEN)
+    z3;
+
+data_ov <- llvm_verify m "<MANGLED_string_data>"
+    [] false
+    (string_data_override MAX_TOKEN_LEN)
+    z3;
+
+cstr_ov <- llvm_verify m "<MANGLED_string_c_str>"
+    [] false
+    (string_c_str_override MAX_TOKEN_LEN)
+    z3;
+
+ctor_ov <- llvm_verify m "<MANGLED_string_ctor>"
+    [] false
+    (string_construct_override MAX_TOKEN_LEN)
+    z3;
+*/
+
+// =========================================================================
+// Section 6: Register string operation overrides (165.2)
+// =========================================================================
+// These replace std::string compare/find/substr/operator== with the
+// Cryptol specs from StringOps.cry.
+
+/*
+cmp_ov <- llvm_verify m "<MANGLED_string_compare>"
+    [] false
+    (string_compare_override MAX_TOKEN_LEN)
+    z3;
+
+eq_ov <- llvm_verify m "<MANGLED_string_operator_eq>"
+    [] false
+    (string_equal_override MAX_TOKEN_LEN)
+    z3;
+
+substr_ov <- llvm_verify m "<MANGLED_string_substr>"
+    [ctor_ov] false
+    (string_substr_override MAX_TOKEN_LEN)
+    z3;
+
+find_ov <- llvm_verify m "<MANGLED_string_find>"
+    [] false
+    (string_find_override MAX_TOKEN_LEN PATTERN_MAX)
+    z3;
+*/
+
+// =========================================================================
+// Section 7: Register crypto overrides (165.3)
+// =========================================================================
+// These replace platform crypto calls (BCrypt / OpenSSL) with the
+// Cryptol specs from CryptoSpecs.cry.
+//
+// We use llvm_unsafe_assume_spec because the crypto implementations
+// are validated separately (by the cryptol-specs test suite) and SAW
+// cannot execute through their assembly.
+
+/*
+hmac_ov <- llvm_unsafe_assume_spec m "<MANGLED_hmac_sha256>"
+    (hmac_sha256_override HMAC_KEY_LEN HMAC_MSG_LEN);
+
+sha_ov <- llvm_unsafe_assume_spec m "<MANGLED_sha256>"
+    (sha256_override HMAC_MSG_LEN);
+
+b64_ov <- llvm_unsafe_assume_spec m "<MANGLED_base64_decode>"
+    (base64_decode_override SIG_ENC_LEN);
+*/
+
+// =========================================================================
+// Section 8: Register chrono / time overrides (165.4)
+// =========================================================================
+// These replace std::chrono calls with symbolic i64 operations so SAW
+// can reason about time-dependent branching.
+
+/*
+now_ov <- llvm_verify m "<MANGLED_system_clock_now>"
+    [] false
+    system_clock_now_override
+    z3;
+
+from_time_t_ov <- llvm_verify m "<MANGLED_from_time_t>"
+    [] false
+    from_time_t_override
+    z3;
+
+lt_ov <- llvm_verify m "<MANGLED_time_point_lt>"
+    [] false
+    time_point_less_override
+    z3;
+
+gt_ov <- llvm_verify m "<MANGLED_time_point_gt>"
+    [] false
+    time_point_greater_override
+    z3;
+
+count_ov <- llvm_verify m "<MANGLED_duration_count>"
+    [] false
+    duration_count_override
+    z3;
+*/
+
+// =========================================================================
+// Section 9: Authenticate specification
+// =========================================================================
+// This is the spec for RequestValidator::Authenticate.  SAW will
+// symbolically execute the C++ function using all the overrides above
+// and check that the result matches the Cryptol-level authenticate_spec.
+
+let authenticate_setup = do {
+    // --- Pre-state ---
+
+    // 1. Symbolic "this" pointer for RequestValidator
+    //    The validator object holds the HMAC key.
+    let validator_ty = llvm_struct "struct.RequestValidator";
+    self <- llvm_alloc validator_ty;
+
+    // 2. Symbolic HMAC key stored inside the validator
+    key <- llvm_fresh_var "hmac_key" (llvm_array MAX_KEY_LEN (llvm_int 8));
+    key_ptr <- llvm_alloc (llvm_array MAX_KEY_LEN (llvm_int 8));
+    llvm_points_to key_ptr (llvm_term key);
+
+    // Wire the key pointer into the validator struct.
+    // Adjust field index to match your struct layout.
+    llvm_points_to_at_type self
+        (llvm_struct_type [llvm_type "i8*", llvm_int 64])
+        (llvm_struct_value [key_ptr, llvm_term {{ `MAX_KEY_LEN : [64] }}]);
+
+    // 3. Symbolic input token (as our string model)
+    token <- llvm_fresh_string "token" MAX_TOKEN_LEN;
+
+    // 4. Symbolic time values for expiration checking
+    current_time <- llvm_fresh_var "current_time" (llvm_int 64);
+    issue_time   <- llvm_fresh_var "issue_time"   (llvm_int 64);
+    ttl          <- llvm_fresh_var "ttl"           (llvm_int 64);
+
+    // --- Preconditions ---
+
+    // Token has a sensible length
+    llvm_precond {{ token.len >= 10 }};
+    llvm_precond {{ token.len <= `MAX_TOKEN_LEN }};
+
+    // Key is non-empty
+    llvm_precond {{ `MAX_KEY_LEN >= (1 : [64]) }};
+
+    // Time preconditions: issued time is in the past
+    llvm_precond {{ time_before issue_time current_time }};
+
+    // TTL is positive (non-zero duration)
+    llvm_precond {{ ttl > 0 }};
+
+    // --- Execute ---
+    llvm_execute_func [ self, token.this_ptr ];
+
+    // --- Post-state ---
+
+    // The return value (i32) should match our Cryptol spec.
+    // The authenticate_spec function returns 1 for success, 0 for failure.
+    let result = {{ authenticate_spec
+                        token.buf token.len
+                        key
+                        current_time issue_time ttl }};
+    llvm_return (llvm_term result);
+};
+
+// =========================================================================
+// Section 10: Run the composed verification
+// =========================================================================
+// Bring all overrides together and verify Authenticate end-to-end.
+
+/*
+print "Running end-to-end verification of RequestValidator::Authenticate...";
+
+// Collect all override handles into a single list
+let all_overrides =
+    [ // String model (165.1)
+      size_ov, data_ov, cstr_ov, ctor_ov
+      // String operations (165.2)
+    , cmp_ov, eq_ov, substr_ov, find_ov
+      // Crypto (165.3)
+    , hmac_ov, sha_ov, b64_ov
+      // Chrono/time (165.4)
+    , now_ov, from_time_t_ov, lt_ov, gt_ov, count_ov
+    ];
+
+// Verify the Authenticate method compositionally.
+// SAW will symbolically execute the C++ implementation, intercept every
+// call to a string/crypto/time function via the overrides, and check
+// that the final return value matches authenticate_spec.
+//
+// Replace "<MANGLED_Authenticate>" with the actual mangled name of
+// RequestValidator::Authenticate from your bitcode.
+//   MSVC:    ?Authenticate@RequestValidator@@QEAAHV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@@Z
+//   Itanium: _ZN18RequestValidator12AuthenticateENSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEE
+
+auth_result <- llvm_verify m "<MANGLED_Authenticate>"
+    all_overrides
+    false
+    authenticate_setup
+    z3;
+
+print "Verification SUCCEEDED.";
+print "RequestValidator::Authenticate matches the Cryptol spec";
+print "under all symbolic inputs satisfying the preconditions.";
+*/
+
+// =========================================================================
+// Section 11: Summary
+// =========================================================================
+
+print "";
+print "=== authenticate_verify.saw ===";
+print "";
+print "This script defines the end-to-end verification of";
+print "RequestValidator::Authenticate by composing:";
+print "  - String SSO model overrides    (string_overrides.saw)";
+print "  - String operation overrides    (string_ops_overrides.saw)";
+print "  - Crypto overrides              (crypto_overrides.saw)";
+print "  - Chrono/time overrides         (chrono_overrides.saw)";
+print "";
+print "To run verification:";
+print "  1. Compile your C++ source to LLVM bitcode with clang++";
+print "  2. Uncomment the llvm_load_module call (Section 4)";
+print "  3. Replace all <MANGLED_...> placeholders with actual symbols";
+print "     from your bitcode (use llvm-nm to find them)";
+print "  4. Uncomment the llvm_verify / llvm_unsafe_assume_spec calls";
+print "  5. Run: saw authenticate_verify.saw";
+print "";
+print "All override specs loaded successfully.";
