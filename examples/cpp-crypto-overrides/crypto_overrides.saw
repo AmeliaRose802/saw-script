@@ -1,0 +1,155 @@
+/*
+ * SAW overrides that map platform crypto API calls to Cryptol specifications.
+ *
+ * Usage:
+ *   1. Compile C++ to LLVM bitcode (clang++ -emit-llvm -c -g ...)
+ *   2. Adjust the function names below to match the mangled symbols in your
+ *      bitcode (use `llvm-nm` or `saw` to list symbols).
+ *   3. Run:  saw crypto_overrides.saw
+ *
+ * The overrides intercept calls to platform crypto primitives and replace
+ * them with the proven-correct Cryptol specifications from cryptol-specs,
+ * letting SAW execute through the surrounding application logic symbolically.
+ */
+
+// Load the Cryptol specs module.
+// CRYPTOLPATH should include both this directory and deps/cryptol-specs/.
+import "CryptoSpecs.cry";
+
+// ---------------------------------------------------------------------------
+// Helper combinators
+// ---------------------------------------------------------------------------
+
+let i8  = llvm_int 8;
+let i32 = llvm_int 32;
+let i64 = llvm_int 64;
+
+let alloc_init ty v = do {
+    p <- llvm_alloc ty;
+    llvm_points_to p v;
+    return p;
+};
+
+let ptr_to_fresh name ty = do {
+    x <- llvm_fresh_var name ty;
+    p <- alloc_init ty (llvm_term x);
+    return (x, p);
+};
+
+// ---------------------------------------------------------------------------
+// HMAC-SHA256 override
+// ---------------------------------------------------------------------------
+// This spec models a C function with the signature:
+//
+//   int hmac_sha256(const uint8_t *key,  uint32_t key_len,
+//                   const uint8_t *data, uint32_t data_len,
+//                   uint8_t *out);          // 32-byte output buffer
+//
+// Adjust the parameter types and calling convention to match your platform
+// API (e.g. BCryptHash on Windows or HMAC() from OpenSSL).
+
+let hmac_sha256_override key_len msg_len = do {
+    // Symbolic inputs
+    (key, key_ptr) <- ptr_to_fresh "key" (llvm_array key_len i8);
+    (msg, msg_ptr) <- ptr_to_fresh "msg" (llvm_array msg_len i8);
+    out_ptr        <- llvm_alloc (llvm_array 32 i8);
+
+    // Call
+    llvm_execute_func
+      [ key_ptr, llvm_term {{ `key_len : [32] }}
+      , msg_ptr, llvm_term {{ `msg_len : [32] }}
+      , out_ptr
+      ];
+
+    // Postcondition: output buffer contains the Cryptol HMAC-SHA256 result
+    llvm_points_to out_ptr
+      (llvm_term {{ hmac_sha256_bytes key msg }});
+
+    // Return 0 for success
+    llvm_return (llvm_term {{ 0 : [32] }});
+};
+
+// ---------------------------------------------------------------------------
+// SHA-256 override
+// ---------------------------------------------------------------------------
+// Models:
+//   int sha256(const uint8_t *data, uint32_t data_len, uint8_t *out);
+
+let sha256_override msg_len = do {
+    (msg, msg_ptr) <- ptr_to_fresh "msg" (llvm_array msg_len i8);
+    out_ptr        <- llvm_alloc (llvm_array 32 i8);
+
+    llvm_execute_func
+      [ msg_ptr, llvm_term {{ `msg_len : [32] }}
+      , out_ptr
+      ];
+
+    llvm_points_to out_ptr
+      (llvm_term {{ sha256_bytes msg }});
+
+    llvm_return (llvm_term {{ 0 : [32] }});
+};
+
+// ---------------------------------------------------------------------------
+// Base64 decode override
+// ---------------------------------------------------------------------------
+// Models:
+//   int base64_decode(const uint8_t *in, uint32_t in_len,
+//                     uint8_t *out, uint32_t *out_len);
+//
+// in_len must be a multiple of 4; decoded length = 3 * (in_len / 4).
+
+let base64_decode_override enc_len = do {
+    let dec_len = eval_int {{ (`enc_len : [32]) / 4 * 3 }};
+
+    (enc, enc_ptr) <- ptr_to_fresh "enc" (llvm_array enc_len i8);
+    out_ptr        <- llvm_alloc (llvm_array dec_len i8);
+    out_len_ptr    <- llvm_alloc i32;
+
+    llvm_execute_func
+      [ enc_ptr, llvm_term {{ `enc_len : [32] }}
+      , out_ptr, out_len_ptr
+      ];
+
+    llvm_points_to out_ptr
+      (llvm_term {{ base64_decode enc }});
+    llvm_points_to out_len_ptr
+      (llvm_term {{ `dec_len : [32] }});
+
+    llvm_return (llvm_term {{ 0 : [32] }});
+};
+
+// ---------------------------------------------------------------------------
+// Template: verifying a function that calls crypto primitives
+// ---------------------------------------------------------------------------
+//
+// Uncomment and adapt once you have the LLVM bitcode for your target.
+//
+// let main : TopLevel () = do {
+//     m <- llvm_load_module "authenticate.bc";
+//
+//     // 1. Verify (or assume) crypto overrides
+//     hmac_ov <- llvm_unsafe_assume_spec m "hmac_sha256"
+//                  (hmac_sha256_override 32 64);
+//
+//     sha_ov  <- llvm_unsafe_assume_spec m "sha256"
+//                  (sha256_override 64);
+//
+//     b64_ov  <- llvm_unsafe_assume_spec m "base64_decode"
+//                  (base64_decode_override 44);
+//
+//     // 2. Verify application function using crypto overrides
+//     //    SAW will execute `validate_token` symbolically but intercept
+//     //    calls to crypto functions with the Cryptol specs above.
+//     llvm_verify m "validate_token"
+//       [hmac_ov, sha_ov, b64_ov]
+//       false
+//       validate_token_spec
+//       z3;
+//
+//     print "Verification complete.";
+// };
+
+print "crypto_overrides.saw loaded successfully.";
+print "Define concrete key/message sizes, adjust symbol names, then";
+print "uncomment the `main` block to run verification.";

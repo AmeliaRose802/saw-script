@@ -1,0 +1,114 @@
+/*
+ * Cryptol specifications for crypto primitives used by C++ verification.
+ *
+ * Wraps the cryptol-specs implementations of SHA-256 and HMAC-SHA256 and
+ * provides a Base64 decode spec.  These are intended to be loaded by SAW
+ * and used as compositional overrides when verifying C++ code that calls
+ * platform crypto APIs (BCrypt on Windows, OpenSSL on Linux).
+ */
+module CryptoSpecs where
+
+import Primitive::Keyless::Hash::SHA2::Instantiations::SHA256 as SHA256
+import Primitive::Symmetric::MAC::HMAC::Instantiations::HMAC_SHA256 as HMAC_SHA256
+
+// --- SHA-256 -----------------------------------------------------------------
+
+/**
+ * SHA-256 hash over a byte sequence of length `n`.
+ * Returns a 256-bit digest (32 bytes packed as a bitvector).
+ */
+sha256 : {n} (SHA256::ValidMessageLength (8 * n)) => [n][8] -> [256]
+sha256 msg = join (SHA256::hashBytes msg)
+
+/**
+ * SHA-256 returning the digest as 32 bytes (useful for pointer-based specs).
+ */
+sha256_bytes : {n} (SHA256::ValidMessageLength (8 * n)) => [n][8] -> [32][8]
+sha256_bytes msg = SHA256::hashBytes msg
+
+// --- HMAC-SHA256 -------------------------------------------------------------
+
+/**
+ * HMAC-SHA256 keyed hash.
+ * Returns the 256-bit MAC tag as a bitvector.
+ */
+hmac_sha256 : {keyLen, msgLen}
+  ( fin keyLen, fin msgLen
+  , width (8 * keyLen) <= 64
+  , width (8 * (msgLen + 64)) <= 64
+  ) => [keyLen][8] -> [msgLen][8] -> [256]
+hmac_sha256 key msg = join (HMAC_SHA256::hmac key msg)
+
+/**
+ * HMAC-SHA256 returning the tag as 32 bytes.
+ */
+hmac_sha256_bytes : {keyLen, msgLen}
+  ( fin keyLen, fin msgLen
+  , width (8 * keyLen) <= 64
+  , width (8 * (msgLen + 64)) <= 64
+  ) => [keyLen][8] -> [msgLen][8] -> [32][8]
+hmac_sha256_bytes key msg = HMAC_SHA256::hmac key msg
+
+// --- Base64 decode -----------------------------------------------------------
+
+/*
+ * RFC 4648 Base64 alphabet.
+ * Maps each printable base64 character (as an 8-bit value) to its 6-bit index.
+ * Invalid characters map to 0 (verification should ensure only valid chars
+ * appear in practice).
+ */
+
+private
+  base64_char_to_val : [8] -> [6]
+  base64_char_to_val c
+    | c >= 0x41 && c <= 0x5A = drop (c - 0x41)        // A-Z  -> 0-25
+    | c >= 0x61 && c <= 0x7A = drop (c - 0x61 + 26)    // a-z  -> 26-51
+    | c >= 0x30 && c <= 0x39 = drop (c - 0x30 + 52)    // 0-9  -> 52-61
+    | c == 0x2B              = 62                        // +    -> 62
+    | c == 0x2F              = 63                        // /    -> 63
+    | True                   = 0                         // padding / invalid
+
+/**
+ * Decode a base64-encoded byte string.
+ *
+ * `encLen` is the number of encoded bytes (must be a multiple of 4).
+ * Returns `decLen` decoded bytes, where `decLen = 3 * (encLen / 4)`.
+ *
+ * Padding bytes ('=') decode to zero; callers should track the actual
+ * decoded length externally (typically encLen is known at verification time).
+ */
+base64_decode : {encLen, decLen}
+  ( fin encLen, fin decLen
+  , encLen % 4 == 0
+  , decLen == 3 * (encLen / 4)
+  ) => [encLen][8] -> [decLen][8]
+base64_decode encoded = decoded
+  where
+    // Process in groups of 4 encoded chars -> 3 decoded bytes
+    groups = groupBy`{4} encoded
+    decoded = join [ decode_group g | g <- groups ]
+
+    decode_group : [4][8] -> [3][8]
+    decode_group [a, b, c, d] = [o0, o1, o2]
+      where
+        va = base64_char_to_val a
+        vb = base64_char_to_val b
+        vc = base64_char_to_val c
+        vd = base64_char_to_val d
+        combined : [24]
+        combined = (0b000000 # va) # (0b000000 # vb) #
+                   (0b000000 # vc) # (0b000000 # vd)
+        [o0, o1, o2] = split combined : [3][8]
+
+// --- Base64 encode (for test properties) -------------------------------------
+
+private
+  base64_alphabet : [64][8]
+  base64_alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+
+/**
+ * Smoke-test property: encoding then decoding "Man" yields the original.
+ * "Man" base64-encodes to "TWFu" (4 bytes -> 3 bytes decoded).
+ */
+property base64_roundtrip_Man =
+  base64_decode `{encLen=4, decLen=3} "TWFu" == "Man"
