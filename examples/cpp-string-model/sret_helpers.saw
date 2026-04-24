@@ -1,0 +1,159 @@
+/*
+ * SAW helpers for sret (struct-return) handling in C++ verification.
+ *
+ * Problem:
+ *   When a C++ function returns a struct by value, the calling convention
+ *   allocates an sret buffer (typically `[N x i8]`) and passes a pointer
+ *   to it as a hidden first argument.  Inside the callee, the struct
+ *   fields are stored through typed GEP paths (e.g., %class.std::tuple →
+ *   %struct._Tuple_val → concrete fields).  SAW's memory model rejects
+ *   these stores because the allocation was typed as a byte array, not
+ *   the struct.
+ *
+ *   Error message:
+ *     "Memory store failed - region not allocated/large enough/readonly"
+ *
+ *   `enable_lax_loads_and_stores` does NOT fix this because it only
+ *   relaxes *loads* from uninitialised memory, not type-mismatched stores.
+ *
+ * Solution:
+ *   Allocate the sret buffer with the **struct type** instead of the
+ *   byte-array type.  `llvm_alloc` accepts any LLVM type, including
+ *   named structs.  By matching the allocation type to the callee's
+ *   expected layout, stores through typed GEPs succeed.
+ *
+ * Limitations:
+ *   - The struct type must exist in the bitcode module (use `llvm_struct`
+ *     with the exact name from `llvm-nm` / `llvm-dis` output).
+ *   - If the type name is mangled differently between MSVC and Itanium
+ *     ABIs, you need platform-specific aliases.
+ *   - `llvm_alias` for struct types is not supported; use the full
+ *     `llvm_struct "..."` name directly.
+ *
+ * Usage:
+ *   include "sret_helpers.saw";
+ *   // ... in your spec:
+ *   ret <- llvm_alloc_sret (llvm_struct "class.std::tuple.89");
+ */
+
+// =========================================================================
+// Type aliases (shared with other override files)
+// =========================================================================
+
+let i8  = llvm_int 8;
+let i32 = llvm_int 32;
+let i64 = llvm_int 64;
+
+// =========================================================================
+// Core helper: allocate sret with the correct struct type
+// =========================================================================
+
+/*
+ * llvm_alloc_sret : allocate a mutable buffer typed as `ty`.
+ *
+ * Use this instead of letting SAW infer `[N x i8]` from the calling
+ * convention.  Pass the LLVM named-struct type that the callee expects:
+ *
+ *   ret <- llvm_alloc_sret (llvm_struct "class.std::tuple.89");
+ *   llvm_execute_func [ret, ...];
+ *
+ * The allocation is mutable so the callee can store into it.
+ */
+let llvm_alloc_sret ty = do {
+    p <- llvm_alloc ty;
+    return p;
+};
+
+/*
+ * llvm_alloc_sret_init : allocate sret and symbolically initialise it.
+ *
+ * Useful when the callee reads fields before writing them (e.g.,
+ * copy-constructors that check a discriminant before assigning).
+ */
+let llvm_alloc_sret_init ty = do {
+    p <- llvm_alloc_sym_init ty;
+    return p;
+};
+
+// =========================================================================
+// Pattern: override a function that returns via sret
+// =========================================================================
+
+/*
+ * llvm_setup_sret_return : sets up both the sret pointer and the
+ * postcondition that the return value is written there.
+ *
+ * Parameters:
+ *   ty     - LLVM struct type for the sret buffer
+ *   fields - a SAWScript value (llvm_struct_value [...]) to write back
+ *
+ * Returns the sret pointer for use in llvm_execute_func.
+ *
+ * Example:
+ *   let tuple_ty = llvm_struct "class.std::tuple.89";
+ *   (sret_ptr, setup_post) <- llvm_setup_sret_return tuple_ty;
+ *   llvm_execute_func [sret_ptr, arg1, arg2];
+ *   setup_post (llvm_struct_value [field1_val, field2_val]);
+ */
+let llvm_setup_sret_return ty = do {
+    p <- llvm_alloc ty;
+    // Return the pointer and a closure that writes the postcondition
+    let setup_post = \val -> do {
+        llvm_points_to p val;
+    };
+    return (p, setup_post);
+};
+
+// =========================================================================
+// Pattern: override at the call boundary (workaround)
+// =========================================================================
+
+/*
+ * When llvm_alloc_sret is not sufficient (e.g., deeply nested virtual
+ * calls or template instantiations with unknown type names), override
+ * at the **caller** boundary instead of entering the callee:
+ *
+ *   1. Identify the function that *calls* the sret function.
+ *   2. Write an override for the caller that:
+ *      a. Allocates its own inputs.
+ *      b. Specifies the return value directly (skipping the sret callee).
+ *   3. Verify at the higher abstraction level.
+ *
+ * Example: instead of verifying CreateKey (which uses sret for
+ * std::tuple<bool,LatchableKey>), verify IsMachineEnabled or
+ * Authenticate directly and treat CreateKey as an opaque function
+ * whose postcondition you assert in the caller's spec.
+ *
+ * This is the RECOMMENDED approach when:
+ *   - The sret struct type name is not in the bitcode (optimised away).
+ *   - The callee has deep template instantiations with mangled names
+ *     that differ between compiler versions.
+ *   - You only care about the caller's contract, not the callee's
+ *     internal behaviour.
+ */
+
+// =========================================================================
+// Diagnostic: print the type name for debugging
+// =========================================================================
+
+/*
+ * Finding the correct struct type name:
+ *
+ * 1. Run `llvm-dis module.bc -o module.ll` and search for the sret
+ *    attribute in the callee's signature:
+ *
+ *      define void @_Z9CreateKeyPKc(%class.std::tuple.89* sret ...
+ *
+ *    The type before `sret` is what you pass to llvm_alloc_sret.
+ *
+ * 2. Alternatively, search for the struct definition:
+ *
+ *      %class.std::tuple.89 = type { %struct._Tuple_val.84 }
+ *      %struct._Tuple_val.84 = type { %class.LatchableKey, i8 }
+ *
+ * 3. For MSVC bitcode, the names may differ:
+ *
+ *      %"class.std::tuple<bool,LatchableKey>" = type { ... }
+ *
+ *    Use the exact string from your bitcode.
+ */

@@ -1,0 +1,182 @@
+/*
+ * SAW overrides for common C++ sret (struct-return) patterns.
+ *
+ * These overrides allocate sret buffers with the correct struct type
+ * so that SAW's memory model accepts stores through typed GEP paths.
+ *
+ * Prerequisites:
+ *   - include "sret_helpers.saw"  (for llvm_alloc_sret, etc.)
+ *   - The bitcode module must be loaded (llvm_load_module)
+ *   - Struct type names must match your bitcode exactly; run
+ *     `llvm-dis module.bc -o - | grep 'type {'` to list them.
+ *
+ * Usage:
+ *   include "sret_helpers.saw";
+ *   include "sret_overrides.saw";
+ *   m <- llvm_load_module "mymodule.bc";
+ *   tuple_ov <- llvm_verify m "<mangled_CreateKey>" [...] false
+ *                 create_key_tuple_spec abc;
+ */
+
+include "sret_helpers.saw";
+
+// =========================================================================
+// Type aliases
+// =========================================================================
+
+let i8  = llvm_int 8;
+let i32 = llvm_int 32;
+let i64 = llvm_int 64;
+
+// =========================================================================
+// Override: std::tuple<bool, T> returned via sret
+// =========================================================================
+
+/*
+ * std::tuple<bool, T> sret override template.
+ *
+ * In LLVM IR, a function returning std::tuple<bool, T> looks like:
+ *
+ *   define void @func(%class.std::tuple.N* noalias sret(...) %agg.result, ...)
+ *
+ * The callee stores into the sret pointer through:
+ *   %class.std::tuple.N  →  %struct._Tuple_val.M  →  inner fields
+ *
+ * This template allocates the sret buffer with the outer tuple type
+ * and sets up postconditions for the two fields.
+ *
+ * Parameters:
+ *   tuple_type_name  - e.g., "class.std::tuple.89"
+ *   inner_type_name  - e.g., "struct._Tuple_val.84"
+ *   payload_ty       - LLVM type of the non-bool payload (e.g., llvm_struct "class.LatchableKey")
+ *
+ * You MUST customise the type names and field layout for your bitcode.
+ */
+
+/*
+ * Example spec for: std::tuple<bool, LatchableKey> CreateKey(const char*)
+ *
+ * Uncomment and adjust type names to match your bitcode.
+ *
+ * let create_key_tuple_spec = do {
+ *     // --- Preconditions ---
+ *     // sret pointer: allocate with the *struct* type, not [128 x i8]
+ *     let tuple_ty = llvm_struct "class.std::tuple.89";
+ *     sret_ptr <- llvm_alloc_sret tuple_ty;
+ *
+ *     // Input: const char* key_name
+ *     key_name <- llvm_fresh_var "key_name" (llvm_array 64 i8);
+ *     key_name_ptr <- llvm_alloc_readonly (llvm_array 64 i8);
+ *     llvm_points_to key_name_ptr (llvm_term key_name);
+ *
+ *     // --- Function call ---
+ *     // sret is always the first argument in the calling convention
+ *     llvm_execute_func [sret_ptr, key_name_ptr];
+ *
+ *     // --- Postconditions ---
+ *     // The tuple's bool field (success) and payload (LatchableKey)
+ *     // are written through the sret pointer.
+ *     //
+ *     // Access fields via llvm_field:
+ *     //   sret_ptr.0          -> _Tuple_val
+ *     //   sret_ptr.0.0        -> LatchableKey (or first field)
+ *     //   sret_ptr.0.1        -> bool (success flag), padded to i8
+ *     //
+ *     // Or use llvm_points_to_at_type for the whole struct:
+ *     success <- llvm_fresh_var "success" i8;
+ *     llvm_points_to (llvm_field (llvm_field sret_ptr "0") "1")
+ *                    (llvm_term success);
+ * };
+ */
+
+// =========================================================================
+// Override: std::pair<T, U> returned via sret
+// =========================================================================
+
+/*
+ * std::pair<T, U> has a simpler layout than std::tuple:
+ *
+ *   %"class.std::pair" = type { T, U }
+ *
+ * No intermediate _Tuple_val wrapper, so GEP indexing is direct.
+ *
+ * Example:
+ *
+ * let get_status_pair_spec = do {
+ *     let pair_ty = llvm_struct "struct.std::pair";
+ *     sret_ptr <- llvm_alloc_sret pair_ty;
+ *
+ *     self_ptr <- llvm_alloc_readonly (llvm_struct "class.Device");
+ *     // ... set up self fields ...
+ *
+ *     llvm_execute_func [sret_ptr, self_ptr];
+ *
+ *     status <- llvm_fresh_var "status" i32;
+ *     message <- llvm_fresh_var "message" (llvm_array 64 i8);
+ *     llvm_points_to (llvm_field sret_ptr "0") (llvm_term status);
+ *     llvm_points_to (llvm_field sret_ptr "1") (llvm_term message);
+ * };
+ */
+
+// =========================================================================
+// Override: domain-specific types (LatchableKey, etc.)
+// =========================================================================
+
+/*
+ * For domain types returned by value, the same pattern applies:
+ * allocate with the struct type, not the byte array.
+ *
+ * Example for LatchableKey returned by value:
+ *
+ * let latchable_key_sret_spec = do {
+ *     let key_ty = llvm_struct "class.LatchableKey";
+ *     sret_ptr <- llvm_alloc_sret key_ty;
+ *
+ *     // Input arguments (after the hidden sret pointer)
+ *     key_data <- llvm_fresh_var "key_data" (llvm_array 32 i8);
+ *     key_data_ptr <- llvm_alloc_readonly (llvm_array 32 i8);
+ *     llvm_points_to key_data_ptr (llvm_term key_data);
+ *
+ *     llvm_execute_func [sret_ptr, key_data_ptr];
+ *
+ *     // Postcondition: key fields are populated
+ *     result_data <- llvm_fresh_var "result_data" (llvm_array 32 i8);
+ *     result_valid <- llvm_fresh_var "result_valid" i8;
+ *     llvm_points_to (llvm_field sret_ptr "key_data") (llvm_term result_data);
+ *     llvm_points_to (llvm_field sret_ptr "is_valid")  (llvm_term result_valid);
+ * };
+ */
+
+// =========================================================================
+// Workaround reference: overriding at the caller boundary
+// =========================================================================
+
+/*
+ * If the struct type name is not in your bitcode (e.g., it was optimised
+ * away or uses a compiler-internal name you cannot match), override the
+ * **calling** function instead.
+ *
+ * Example: CreateKey returns std::tuple<bool, LatchableKey> via sret,
+ * but the tuple type was inlined away.  Instead of verifying CreateKey,
+ * verify Authenticate (which calls CreateKey) and model CreateKey's
+ * effect directly in Authenticate's spec:
+ *
+ * let authenticate_spec = do {
+ *     // ... set up Authenticate's inputs ...
+ *
+ *     llvm_execute_func [self_ptr, token_ptr, token_len];
+ *
+ *     // Model CreateKey's output as a fresh symbolic value
+ *     // without entering CreateKey's body at all.
+ *     result <- llvm_fresh_var "auth_result" i32;
+ *     llvm_return (llvm_term result);
+ * };
+ *
+ * // Verify with overrides for everything *below* CreateKey:
+ * llvm_verify m "<mangled_Authenticate>"
+ *   [string_size_ov, string_data_ov, hmac_ov, ...]
+ *   false authenticate_spec abc;
+ *
+ * This avoids the sret type mismatch entirely because SAW never
+ * enters the sret function.
+ */
