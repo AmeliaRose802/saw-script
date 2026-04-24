@@ -1792,7 +1792,11 @@ instantiateExtResolveSAWSymBV sc cc w tm = do
 -- | Invalidate all mutable memory that was allocated in the method spec
 -- precondition, either through explicit calls to @llvm_alloc@ or to
 -- @llvm_alloc_global@. As an optimization, a memory allocation that
--- is overwritten by a postcondition memory write is not invalidated.
+-- has any postcondition memory write targeting the same block is not
+-- invalidated. This implements frame-condition semantics: sub-fields not
+-- mentioned in the postcondition retain their precondition values, which
+-- is needed for compositional verification of C++ methods that access
+-- different sub-fields of the same object.
 -- Return a map containing the overwritten memory allocations.
 invalidateMutableAllocs ::
   ( ?lc :: Crucible.TypeContext
@@ -1873,11 +1877,20 @@ invalidateMutableAllocs opts sc cc cs =
         pure $ Just (W4.asNat blk, sz))
     (cs ^. MS.csPostState ^. MS.csPointsTos)
 
-  -- partition allocations into those overwritten by a postcondition write
-  -- and those not overwritten
+  -- Set of block numbers targeted by any postcondition write.
+  -- We check block membership rather than (block, size) equality so that
+  -- an allocation is preserved when postcondition writes cover sub-fields
+  -- rather than the entire allocation.  This implements a frame-condition
+  -- semantics: fields not mentioned in the postcondition retain their
+  -- precondition values, which is essential for compositional verification
+  -- of C++ methods that access different sub-fields of the same object.
+  let postBlocks = Set.map fst postPtrs
+
+  -- partition allocations into those that have any postcondition write
+  -- (and thus should not be invalidated) and those with no coverage at all
   let (overwritten_ptrs, danglingPtrs) = partition
-        (\((Crucible.LLVMPointer blk _), sz, _) ->
-          Set.member (W4.asNat blk, sz) postPtrs)
+        (\((Crucible.LLVMPointer blk _), _sz, _) ->
+          Set.member (W4.asNat blk) postBlocks)
         (allocPtrs ++ globalPtrs)
 
   let overwritten_allocs = Map.fromList $ map
