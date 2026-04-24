@@ -1,0 +1,227 @@
+/*
+ * SAW overrides that model C++ operator new / operator delete and STL
+ * allocator helpers (_Allocate, _Deallocate, _Buy_raw).
+ *
+ * SAW's memory model uses fixed-size block allocations (llvm_alloc).
+ * It cannot model operator new/delete with symbolic sizes directly.
+ * These overrides bridge that gap:
+ *
+ *   - operator new(size_t) is modelled as llvm_alloc of a byte array
+ *     whose size is the *maximum* the caller commits to at verification
+ *     time, with a precondition that the symbolic size <= max.
+ *   - operator delete is a no-op (SAW manages memory lifetime).
+ *
+ * -----------------------------------------------------------------------
+ * Mangled names
+ * -----------------------------------------------------------------------
+ *
+ * Itanium ABI (GCC / Clang):
+ *   operator new(size_t)               _Znwm          (LP64) / _Znwj (ILP32)
+ *   operator new[](size_t)             _Znam          (LP64) / _Znaj (ILP32)
+ *   operator delete(void*)             _ZdlPv
+ *   operator delete[](void*)           _ZdaPv
+ *   operator delete(void*, size_t)     _ZdlPvm
+ *   operator delete[](void*, size_t)   _ZdaPvm
+ *
+ * MSVC (Microsoft ABI):
+ *   operator new(size_t)               ??2@YAPEAX_K@Z
+ *   operator new[](size_t)             ??_U@YAPEAX_K@Z
+ *   operator delete(void*)             ??3@YAXPEAX@Z
+ *   operator delete[](void*)           ??_V@YAXPEAX@Z
+ *   operator delete(void*, size_t)     ??3@YAXPEAX_K@Z
+ *
+ * STL internal allocators (MSVC):
+ *   _Allocate                          ?_Allocate@std@@YAPEAX_K0@Z  (varies)
+ *   _Deallocate                        ?_Deallocate@std@@YAXPEAX_K0@Z
+ *   _Buy_raw                           (inlined in most builds)
+ *
+ * STL internal allocators (libstdc++ / libc++):
+ *   allocate                           _ZNSt16allocator_traitsISaIcEE8allocateERS0_m
+ *   deallocate                         _ZNSt16allocator_traitsISaIcEE10deallocateERS0_Pcm
+ *
+ * Use `llvm-nm <bitcode>` to find the exact symbols in your build.
+ * -----------------------------------------------------------------------
+ */
+
+import "HeapModel.cry";
+
+// ---------------------------------------------------------------------------
+// Type aliases (shared with string_overrides.saw)
+// ---------------------------------------------------------------------------
+
+let i8  = llvm_int 8;
+let i64 = llvm_int 64;
+
+// ===========================================================================
+// operator new overrides
+// ===========================================================================
+
+/**
+ * Override for operator new(size_t).
+ *
+ *   Itanium: _Znwm
+ *   MSVC:    ??2@YAPEAX_K@Z
+ *
+ * @param max_size  upper bound on the allocation size (chosen at
+ *                  verification time).  The override allocates a byte
+ *                  array of this fixed size and adds a precondition
+ *                  that the symbolic `size` argument is <= max_size.
+ */
+let operator_new_override max_size = do {
+    size <- llvm_fresh_var "new_size" i64;
+    llvm_precond {{ valid_alloc_size size `max_size }};
+
+    llvm_execute_func [ llvm_term size ];
+
+    buf <- llvm_alloc (llvm_array max_size i8);
+    llvm_return buf;
+};
+
+/**
+ * Override for operator new[](size_t).
+ *
+ *   Itanium: _Znam
+ *   MSVC:    ??_U@YAPEAX_K@Z
+ *
+ * Identical to operator_new_override; separated for clarity when
+ * registering overrides against different mangled names.
+ */
+let operator_new_array_override max_size = do {
+    size <- llvm_fresh_var "new_array_size" i64;
+    llvm_precond {{ valid_alloc_size size `max_size }};
+
+    llvm_execute_func [ llvm_term size ];
+
+    buf <- llvm_alloc (llvm_array max_size i8);
+    llvm_return buf;
+};
+
+// ===========================================================================
+// operator delete overrides
+// ===========================================================================
+
+/**
+ * Override for operator delete(void*).
+ *
+ *   Itanium: _ZdlPv
+ *   MSVC:    ??3@YAXPEAX@Z
+ *
+ * No-op: SAW manages memory lifetime; deallocation has no effect on
+ * the verification model.
+ */
+let operator_delete_override = do {
+    ptr <- llvm_alloc i8;          // dummy allocation to accept the argument
+    llvm_execute_func [ ptr ];
+    // no return value (void)
+};
+
+/**
+ * Override for operator delete[](void*).
+ *
+ *   Itanium: _ZdaPv
+ *   MSVC:    ??_V@YAXPEAX@Z
+ */
+let operator_delete_array_override = do {
+    ptr <- llvm_alloc i8;
+    llvm_execute_func [ ptr ];
+};
+
+/**
+ * Override for operator delete(void*, size_t)  (C++14 sized deallocation).
+ *
+ *   Itanium: _ZdlPvm
+ *   MSVC:    ??3@YAXPEAX_K@Z
+ */
+let operator_delete_sized_override = do {
+    ptr  <- llvm_alloc i8;
+    size <- llvm_fresh_var "delete_size" i64;
+    llvm_execute_func [ ptr, llvm_term size ];
+};
+
+// ===========================================================================
+// STL allocator overrides
+// ===========================================================================
+
+/**
+ * Override for STL internal allocation helpers such as:
+ *   - std::_Allocate           (MSVC)
+ *   - std::allocator::allocate (libstdc++ / libc++)
+ *   - _Buy_raw                 (MSVC vector internals)
+ *
+ * Models the allocator as returning a fresh byte array of max_size.
+ * Adds a precondition that the requested count * element_size <= max_size.
+ */
+let stl_allocate_override max_size = do {
+    size <- llvm_fresh_var "alloc_size" i64;
+    llvm_precond {{ valid_alloc_size size `max_size }};
+
+    // STL allocators typically take (size, alignment) or just (size)
+    llvm_execute_func [ llvm_term size ];
+
+    buf <- llvm_alloc (llvm_array max_size i8);
+    llvm_return buf;
+};
+
+/**
+ * Override for STL internal deallocation helpers such as:
+ *   - std::_Deallocate           (MSVC)
+ *   - std::allocator::deallocate (libstdc++ / libc++)
+ *
+ * No-op.
+ */
+let stl_deallocate_override = do {
+    ptr  <- llvm_alloc i8;
+    size <- llvm_fresh_var "dealloc_size" i64;
+    llvm_execute_func [ ptr, llvm_term size ];
+};
+
+// ===========================================================================
+// Comprehensive usage example
+// ===========================================================================
+
+/*
+ * Example: verify a function that calls operator new and delete.
+ *
+ * Suppose we have the following C++:
+ *
+ *   extern "C" int process(int n) {
+ *       char* buf = new char[n];
+ *       buf[0] = 'A';
+ *       int result = buf[0];
+ *       delete[] buf;
+ *       return result;
+ *   }
+ *
+ * Compiled to bitcode:
+ *
+ *   clang++ -emit-llvm -c -O1 -fno-exceptions process.cpp -o process.bc
+ *
+ * Verification script:
+ *
+ *   import "HeapModel.cry";
+ *   include "heap_overrides.saw";
+ *
+ *   m <- llvm_load_module "process.bc";
+ *
+ *   let MAX_ALLOC = 1024;
+ *
+ *   // Register operator new[]/delete[] overrides
+ *   new_ov <- llvm_verify m "_Znam"
+ *               [] false (operator_new_array_override MAX_ALLOC) z3;
+ *
+ *   del_ov <- llvm_verify m "_ZdaPv"
+ *               [] false operator_delete_array_override z3;
+ *
+ *   // Verify process() compositionally
+ *   let process_spec = do {
+ *       n <- llvm_fresh_var "n" i64;
+ *       llvm_precond {{ n <= `MAX_ALLOC }};
+ *       llvm_precond {{ n >= 1 }};
+ *       llvm_execute_func [ llvm_term n ];
+ *       llvm_return (llvm_term {{ 65 : [32] }});  // 'A' == 65
+ *   };
+ *
+ *   llvm_verify m "process"
+ *     [new_ov, del_ov]
+ *     false process_spec z3;
+ */
