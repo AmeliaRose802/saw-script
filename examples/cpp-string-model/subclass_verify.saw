@@ -1,0 +1,128 @@
+// subclass_verify.saw — Polymorphic (subclass) verification demo
+//
+// Demonstrates three patterns for verifying virtual methods across
+// multiple concrete types:
+//
+//   1. Manual: call llvm_vtable_slots to inspect, then verify each class
+//   2. Semi-automatic: use llvm_subclasses to discover types, loop over them
+//   3. (Future) Fully automatic: llvm_verify_all_subclasses
+//
+// Prerequisite: compile your C++ with -flto or clang -emit-llvm to produce
+// a single bitcode file containing all class vtables and typeinfo.
+
+// -----------------------------------------------------------------------
+// Setup
+// -----------------------------------------------------------------------
+
+// m <- llvm_load_module "program.bc";
+
+// -----------------------------------------------------------------------
+// Pattern 1: Manual subclass enumeration via vtable inspection
+// -----------------------------------------------------------------------
+//
+// Step 1: Inspect vtables to see which classes exist
+//   llvm_vtable_slots m "Shape";
+//
+// This prints something like:
+//   Vtable for _ZTV5Shape:
+//     slot 0: constant 0
+//     slot 1: _ZTI5Shape
+//     slot 2: _ZN5Shape4areaEv
+//
+//   Vtable for _ZTV6Circle:
+//     slot 0: constant 0
+//     slot 1: _ZTI6Circle
+//     slot 2: _ZN6Circle4areaEv
+//
+//   Vtable for _ZTV9Rectangle:
+//     slot 0: constant 0
+//     slot 1: _ZTI9Rectangle
+//     slot 2: _ZN9Rectangle4areaEv
+//
+// Step 2: Write a spec per concrete type and verify each explicitly
+//
+// let circle_area_spec = do {
+//     r <- llvm_fresh_var "radius" (llvm_int 32);
+//     this <- llvm_alloc (llvm_alias "class.Circle");
+//     llvm_points_to (llvm_field this "radius") (llvm_term r);
+//     llvm_execute_func [this];
+//     // area = pi * r * r (fixed-point or symbolic bound)
+//     llvm_return (llvm_term {{ r * r : [32] }});
+// };
+//
+// circle_area <- llvm_verify m "_ZN6Circle4areaEv" [] false circle_area_spec;
+//
+// let rect_area_spec = do {
+//     w <- llvm_fresh_var "width" (llvm_int 32);
+//     h <- llvm_fresh_var "height" (llvm_int 32);
+//     this <- llvm_alloc (llvm_alias "class.Rectangle");
+//     llvm_points_to (llvm_field this "width") (llvm_term w);
+//     llvm_points_to (llvm_field this "height") (llvm_term h);
+//     llvm_execute_func [this];
+//     llvm_return (llvm_term {{ w * h : [32] }});
+// };
+//
+// rect_area <- llvm_verify m "_ZN9Rectangle4areaEv" [] false rect_area_spec;
+
+// -----------------------------------------------------------------------
+// Pattern 2: Semi-automatic using llvm_subclasses (Phase 1 API)
+// -----------------------------------------------------------------------
+//
+// llvm_subclasses discovers all concrete descendants of a base class by
+// parsing the RTTI typeinfo structures (_ZTI globals) in the LLVM module.
+//
+// subs <- llvm_subclasses m "Shape";
+// // subs = ["Circle", "Rectangle"]
+//
+// // Verify each subclass's area() method:
+// for subs (\cls -> do {
+//     print (str_concat "Verifying area() for: " cls);
+//     let mangled = str_concat "_ZN" (str_concat (show (length cls))
+//                     (str_concat cls "4areaEv"));
+//     llvm_verify m mangled [] false (area_spec_for cls);
+// });
+//
+// The key benefit: adding a new subclass (e.g., Triangle) to the C++ code
+// automatically causes SAW to verify it on the next run — no SAWScript
+// changes needed.
+
+// -----------------------------------------------------------------------
+// Pattern 3: (Future) Fully automatic with llvm_verify_all_subclasses
+// -----------------------------------------------------------------------
+//
+// This will combine subclass discovery with automatic spec instantiation:
+//
+// results <- llvm_verify_all_subclasses m "Shape" "area" (\cls -> do {
+//     this <- llvm_alloc (llvm_alias (str_concat "class." cls));
+//     llvm_execute_func [this];
+//     // Generic post-condition: area() returns a non-negative value
+//     ret <- llvm_fresh_var "ret" (llvm_int 32);
+//     llvm_return (llvm_term ret);
+//     llvm_postcond {{ ret >= 0 : [32] }};
+// });
+//
+// print "All subclass verifications passed.";
+
+// -----------------------------------------------------------------------
+// Pattern for polymorphic verification with llvm_bind_method
+// -----------------------------------------------------------------------
+//
+// When verifying a caller that invokes a virtual method through a vtable,
+// use overrides for each concrete dispatch target:
+//
+// let caller_spec = do {
+//     shape_ptr <- llvm_alloc (llvm_alias "class.Shape");
+//     llvm_execute_func [shape_ptr];
+//     // ...
+// };
+//
+// // Provide overrides for every possible dispatch target
+// caller_ov <- llvm_verify m "process_shape"
+//     [circle_area, rect_area]   // overrides for each subclass impl
+//     false
+//     caller_spec;
+//
+// The set of overrides must cover ALL concrete types that could appear
+// at runtime. llvm_subclasses helps ensure this set is complete.
+
+print "subclass_verify.saw: Patterns for polymorphic verification (demo only).";
