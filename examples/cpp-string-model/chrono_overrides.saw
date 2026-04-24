@@ -1,0 +1,175 @@
+/*
+ * SAW overrides for std::chrono time operations that replace platform
+ * time API calls with symbolic bitvector operations.
+ *
+ * C++ std::chrono::system_clock::time_point is internally a duration
+ * count (i64) since the epoch.  SAW cannot execute through the platform
+ * time syscalls, so we model every time_point as a plain i64 and override
+ * the relevant methods to operate on that representation.
+ *
+ * Typical MSVC mangled names (x86-64):
+ *   system_clock::now()
+ *     ?now@system_clock@chrono@std@@SA?AV?$time_point@Vsystem_clock@chrono@std@@V?$duration@_JV?$ratio@$00$0DLJKMKAA@@std@@@23@@23@XZ
+ *   time_point::operator<
+ *     ??M?$time_point@Vsystem_clock@chrono@std@@V?$duration@_JV?$ratio@$00$0DLJKMKAA@@std@@@23@@chrono@std@@QEBA_NAEBV012@@Z
+ *   time_point::operator>
+ *     ??O?$time_point@Vsystem_clock@chrono@std@@V?$duration@_JV?$ratio@$00$0DLJKMKAA@@std@@@23@@chrono@std@@QEBA_NAEBV012@@Z
+ *   system_clock::from_time_t
+ *     ?from_time_t@system_clock@chrono@std@@SA?AV?$time_point@Vsystem_clock@chrono@std@@V?$duration@_JV?$ratio@$00$0DLJKMKAA@@std@@@23@@23@_J@Z
+ *   duration::count()
+ *     ?count@?$duration@_JV?$ratio@$00$0DLJKMKAA@@std@@@chrono@std@@QEBA_JXZ
+ *
+ * GCC/Clang (Itanium ABI) mangled names:
+ *   system_clock::now()
+ *     _ZNSt6chrono3_V212system_clock3nowEv
+ *   time_point operator< (free function)
+ *     _ZNSt6chrono3_V2ltERKNS0_10time_pointINS0_12system_clockENS0_8durationIlSt5ratioILl1ELl1000000000EEEEEES8_
+ *   time_point operator> (free function)
+ *     _ZNSt6chrono3_V2gtERKNS0_10time_pointINS0_12system_clockENS0_8durationIlSt5ratioILl1ELl1000000000EEEEEES8_
+ *   system_clock::from_time_t
+ *     _ZNSt6chrono3_V212system_clock11from_time_tEl
+ *   duration::count()
+ *     _ZNKSt6chrono3_V28durationIlSt5ratioILl1ELl1000000000EEE5countEv
+ *
+ * Usage:
+ *   // Load prerequisites
+ *   include "chrono_overrides.saw";
+ *
+ *   m <- llvm_load_module "my_program.bc";
+ *
+ *   // Register chrono overrides
+ *   now_ov   <- llvm_verify m "<now_mangled>"        [] false system_clock_now_override z3;
+ *   ft_ov    <- llvm_verify m "<from_time_t_mangled>" [] false from_time_t_override z3;
+ *   lt_ov    <- llvm_verify m "<lt_mangled>"          [] false time_point_less_override z3;
+ *   gt_ov    <- llvm_verify m "<gt_mangled>"          [] false time_point_greater_override z3;
+ *   cnt_ov   <- llvm_verify m "<count_mangled>"       [] false duration_count_override z3;
+ *
+ *   // Use compositionally with time preconditions
+ *   llvm_verify m "ValidateToken"
+ *     [now_ov, ft_ov, lt_ov, gt_ov, cnt_ov]
+ *     false
+ *     (do {
+ *         // Symbolic current time and token issue time
+ *         current_time <- llvm_fresh_var "current_time" i64;
+ *         issue_time   <- llvm_fresh_var "issue_time"   i64;
+ *         // Precondition: token was issued before current time
+ *         llvm_precond {{ time_after current_time issue_time }};
+ *         // ... rest of spec
+ *     })
+ *     z3;
+ */
+
+import "ChronoModel.cry";
+
+// ---------------------------------------------------------------------------
+// Type aliases (shared with string_overrides.saw when loaded together)
+// ---------------------------------------------------------------------------
+
+let i8  = llvm_int 8;
+let i64 = llvm_int 64;
+
+// ---------------------------------------------------------------------------
+// Helper: allocate and initialise a value behind a pointer
+// ---------------------------------------------------------------------------
+
+let alloc_init_chrono ty v = do {
+    p <- llvm_alloc ty;
+    llvm_points_to p v;
+    return p;
+};
+
+let ptr_to_fresh_chrono name ty = do {
+    x <- llvm_fresh_var name ty;
+    p <- alloc_init_chrono ty (llvm_term x);
+    return (x, p);
+};
+
+// ---------------------------------------------------------------------------
+// Override: system_clock::now()
+// ---------------------------------------------------------------------------
+// static time_point now();
+//   Returns a fresh symbolic i64 representing time_since_epoch().count().
+//   The return value is passed via an sret pointer on most ABIs.
+
+let system_clock_now_override = do {
+    // sret: caller-allocated space for the returned time_point
+    ret_ptr <- llvm_alloc i64;
+
+    // Create a completely fresh symbolic time value
+    now_val <- llvm_fresh_var "now" i64;
+
+    llvm_execute_func [ ret_ptr ];
+
+    // Postcondition: the return slot holds the fresh symbolic time
+    llvm_points_to ret_ptr (llvm_term now_val);
+};
+
+// ---------------------------------------------------------------------------
+// Override: system_clock::from_time_t(time_t t)
+// ---------------------------------------------------------------------------
+// static time_point from_time_t(time_t t);
+//   Identity on the integer representation: time_t (i64) becomes
+//   time_point (i64) with the same value.  The actual scaling between
+//   seconds and the clock's duration period is elided because we treat
+//   all time values as opaque symbolic bitvectors.
+
+let from_time_t_override = do {
+    // sret: caller-allocated space for the returned time_point
+    ret_ptr <- llvm_alloc i64;
+
+    // Input: time_t as i64
+    (t, t_ptr) <- ptr_to_fresh_chrono "time_t_val" i64;
+
+    llvm_execute_func [ ret_ptr, llvm_term t ];
+
+    // Postcondition: returned time_point has the same value
+    llvm_points_to ret_ptr (llvm_term t);
+};
+
+// ---------------------------------------------------------------------------
+// Override: time_point::operator<(const time_point& rhs) const
+// ---------------------------------------------------------------------------
+// bool operator<(const time_point& rhs) const;
+//   Signed comparison of the underlying i64 duration counts.
+//   Returns i8 (C++ bool in LLVM IR is typically i8).
+
+let time_point_less_override = do {
+    (lhs, lhs_ptr) <- ptr_to_fresh_chrono "tp_lhs" i64;
+    (rhs, rhs_ptr) <- ptr_to_fresh_chrono "tp_rhs" i64;
+
+    llvm_execute_func [ lhs_ptr, rhs_ptr ];
+
+    let result = {{ if time_before lhs rhs then 1 : [8] else 0 }};
+    llvm_return (llvm_term result);
+};
+
+// ---------------------------------------------------------------------------
+// Override: time_point::operator>(const time_point& rhs) const
+// ---------------------------------------------------------------------------
+// bool operator>(const time_point& rhs) const;
+//   Signed comparison of the underlying i64 duration counts.
+
+let time_point_greater_override = do {
+    (lhs, lhs_ptr) <- ptr_to_fresh_chrono "tp_lhs" i64;
+    (rhs, rhs_ptr) <- ptr_to_fresh_chrono "tp_rhs" i64;
+
+    llvm_execute_func [ lhs_ptr, rhs_ptr ];
+
+    let result = {{ if time_after lhs rhs then 1 : [8] else 0 }};
+    llvm_return (llvm_term result);
+};
+
+// ---------------------------------------------------------------------------
+// Override: duration::count() const
+// ---------------------------------------------------------------------------
+// rep count() const;
+//   Returns the underlying i64 count from a duration / time_point.
+//   Since we model time_point as a bare i64, this is a simple load.
+
+let duration_count_override = do {
+    (tp, tp_ptr) <- ptr_to_fresh_chrono "tp" i64;
+
+    llvm_execute_func [ tp_ptr ];
+
+    llvm_return (llvm_term tp);
+};

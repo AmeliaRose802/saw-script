@@ -1,0 +1,70 @@
+/*
+ * Cryptol specifications for a simplified model of std::chrono time types.
+ *
+ * C++ std::chrono::system_clock::time_point is internally a duration
+ * (nanoseconds or microseconds depending on the platform) stored as a
+ * signed 64-bit integer count since the epoch.  SAW cannot execute
+ * through platform time APIs, so we model time_point as a plain [64]
+ * bitvector representing the underlying count.
+ *
+ * All SAW chrono overrides operate on this representation.
+ */
+module ChronoModel where
+
+// ---------------------------------------------------------------------------
+// Core time model types
+// ---------------------------------------------------------------------------
+
+/** A time point is the underlying duration count as a signed 64-bit value. */
+type TimePoint = [64]
+
+/** A duration is a signed 64-bit count in the same units as TimePoint. */
+type Duration = [64]
+
+// ---------------------------------------------------------------------------
+// Comparison predicates
+// ---------------------------------------------------------------------------
+
+/** True when time point `a` is strictly before time point `b`. */
+time_before : TimePoint -> TimePoint -> Bit
+time_before a b = slt a b
+
+/** True when time point `a` is strictly after time point `b`. */
+time_after : TimePoint -> TimePoint -> Bit
+time_after a b = slt b a
+
+// ---------------------------------------------------------------------------
+// Arithmetic
+// ---------------------------------------------------------------------------
+
+/** Signed difference between two time points (a - b). */
+time_diff : TimePoint -> TimePoint -> Duration
+time_diff a b = a - b
+
+// ---------------------------------------------------------------------------
+// Expiration check
+// ---------------------------------------------------------------------------
+
+/**
+ * Check whether a token has expired.
+ *
+ *   current  - the current time (symbolic)
+ *   issued   - the time the token was issued
+ *   ttl      - time-to-live duration
+ *
+ * Returns True when current > issued + ttl (i.e. the token is expired).
+ */
+is_expired : TimePoint -> TimePoint -> Duration -> Bit
+is_expired current issued ttl = slt (issued + ttl) current
+
+// ---------------------------------------------------------------------------
+// Private helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Signed less-than for 64-bit bitvectors.
+ * Interprets both operands as two's-complement signed integers.
+ */
+private
+  slt : [64] -> [64] -> Bit
+  slt x y = (x ^ (1 << 63)) < (y ^ (1 << 63))
