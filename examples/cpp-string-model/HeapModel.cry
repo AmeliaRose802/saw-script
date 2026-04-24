@@ -1,0 +1,36 @@
+/*
+ * Cryptol specifications for heap allocation validation.
+ *
+ * SAW's memory model uses fixed-size allocations (llvm_alloc).  When
+ * modelling operator new/delete with symbolic sizes we need a simple
+ * predicate to express the constraint that the requested size does not
+ * exceed the maximum the override was instantiated with.
+ */
+module HeapModel where
+
+// ---------------------------------------------------------------------------
+// Allocation validity
+// ---------------------------------------------------------------------------
+
+/**
+ * True when the requested allocation size does not exceed the maximum
+ * buffer size reserved by the SAW override.
+ *
+ *   requested - the symbolic size passed to operator new / _Allocate
+ *   max_size  - the fixed upper bound chosen at verification time
+ */
+valid_alloc_size : [64] -> [64] -> Bit
+valid_alloc_size requested max_size = requested <= max_size
+
+// ---------------------------------------------------------------------------
+// Allocation result (identity)
+// ---------------------------------------------------------------------------
+
+/**
+ * The "result" of an allocation in our model is simply the size itself.
+ * This exists so that downstream specs can refer to the allocation in a
+ * uniform way (e.g. asserting that the returned buffer has at least
+ * `alloc_result n` usable bytes).
+ */
+alloc_result : [64] -> [64]
+alloc_result n = n

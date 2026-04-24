@@ -51,6 +51,8 @@ on this representation instead of the real SSO layout.
 |------|-------------|
 | `StringModel.cry` | Cryptol type and specs: `StringModel n`, equality, validity predicates |
 | `string_overrides.saw` | SAWScript overrides for `size`, `data`, `c_str`, construct, assign, destructor |
+| `HeapModel.cry` | Cryptol specs for heap allocation validation (`valid_alloc_size`, `alloc_result`) |
+| `heap_overrides.saw` | SAWScript overrides for `operator new`/`delete` and STL allocators |
 | `README.md` | This file |
 
 ## Quick Start
@@ -182,3 +184,54 @@ bitcode, as they vary by compiler version and flags.
 - **No null terminator**: The model does not enforce a NUL byte at
   `buf[len]`. If your code relies on `c_str()` returning a NUL-terminated
   buffer, add an explicit postcondition.
+
+## Heap Allocator Overrides
+
+The `heap_overrides.saw` file provides SAWScript overrides that model C++
+`operator new` / `operator delete` and STL internal allocators.
+
+### Why?
+
+SAW's `llvm_alloc` requires a fixed type at verification time.  C++ heap
+allocation (`operator new(size_t)`) takes a *symbolic* size.  These
+overrides bridge the gap by:
+
+1. Accepting a `max_size` parameter chosen at verification time.
+2. Allocating a byte array of that fixed size via `llvm_alloc`.
+3. Adding a precondition that the symbolic `size` argument ≤ `max_size`.
+4. Modelling `operator delete` as a no-op (SAW manages memory lifetime).
+
+### Available Overrides
+
+| Override | Models | Itanium Symbol | MSVC Symbol |
+|----------|--------|----------------|-------------|
+| `operator_new_override max_size` | `operator new(size_t)` | `_Znwm` | `??2@YAPEAX_K@Z` |
+| `operator_new_array_override max_size` | `operator new[](size_t)` | `_Znam` | `??_U@YAPEAX_K@Z` |
+| `operator_delete_override` | `operator delete(void*)` | `_ZdlPv` | `??3@YAXPEAX@Z` |
+| `operator_delete_array_override` | `operator delete[](void*)` | `_ZdaPv` | `??_V@YAXPEAX@Z` |
+| `operator_delete_sized_override` | `operator delete(void*, size_t)` | `_ZdlPvm` | `??3@YAXPEAX_K@Z` |
+| `stl_allocate_override max_size` | `_Allocate` / `_Buy_raw` / `allocator::allocate` | varies | varies |
+| `stl_deallocate_override` | `_Deallocate` / `allocator::deallocate` | varies | varies |
+
+### Quick Example
+
+```saw
+import "HeapModel.cry";
+include "heap_overrides.saw";
+
+m <- llvm_load_module "my_code.bc";
+
+let MAX_ALLOC = 1024;
+
+// Register overrides for operator new / delete
+new_ov <- llvm_verify m "_Znwm"
+            [] false (operator_new_override MAX_ALLOC) z3;
+
+del_ov <- llvm_verify m "_ZdlPv"
+            [] false operator_delete_override z3;
+
+// Use compositionally
+llvm_verify m "my_function"
+  [new_ov, del_ov]
+  false my_function_spec z3;
+```
