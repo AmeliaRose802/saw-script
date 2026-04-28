@@ -1,0 +1,54 @@
+// MIR time stubs for SAW verification (saw-script-slj)
+//
+// These overrides model std::time::SystemTime::now() and
+// std::time::Instant::now() as returning fresh symbolic values,
+// allowing verification of code that uses time functions.
+//
+// Usage:
+//   enable_experimental;
+//   include "lib/mir_time_stubs.saw";
+//   m <- mir_load_module "my_module.linked-mir.json";
+//   time_ovs <- mir_time_stubs m;
+//   mir_verify m "my_fn" time_ovs false my_spec z3;
+
+// Override for std::time::SystemTime::now()
+// Returns a fresh symbolic SystemTime value
+let mir_systemtime_now_spec = do {
+    // SystemTime is typically { secs: u64, nanos: u32 }
+    secs <- mir_fresh_var "now_secs" mir_u64;
+    nanos <- mir_fresh_var "now_nanos" mir_u32;
+    // Constrain to valid range
+    mir_precond {{ nanos < 1000000000 }};
+
+    mir_execute_func [];
+
+    mir_return (mir_tuple [mir_term secs, mir_term nanos]);
+};
+
+// Override for std::time::Instant::now()
+// Returns a fresh symbolic Instant value
+let mir_instant_now_spec = do {
+    secs <- mir_fresh_var "instant_secs" mir_u64;
+    nanos <- mir_fresh_var "instant_nanos" mir_u32;
+    mir_precond {{ nanos < 1000000000 }};
+
+    mir_execute_func [];
+
+    mir_return (mir_tuple [mir_term secs, mir_term nanos]);
+};
+
+// Helper: set up all time-related overrides for a module
+let mir_time_stubs mod = do {
+    print "Setting up MIR time stubs...";
+
+    // Try to create overrides; they'll only succeed if the symbols exist
+    // in the module. Use mir_unsafe_assume_spec for functions we can't
+    // symbolically execute (they call OS syscalls).
+    sys_now <- mir_unsafe_assume_spec mod
+        "std::time::SystemTime::now" mir_systemtime_now_spec;
+
+    inst_now <- mir_unsafe_assume_spec mod
+        "std::time::Instant::now" mir_instant_now_spec;
+
+    return [sys_now, inst_now];
+};

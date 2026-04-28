@@ -86,6 +86,7 @@ import Mir.Intrinsics
 import qualified Mir.Mir as M
 import Mir.TransTy ( tyListToCtx, tyToRepr, tyToReprCont, canInitialize
                    , isUnsized, reprTransparentFieldTy, tySizedness
+                   , coroutineFields
                    , Sizedness (..), tyFields )
 
 import SAWCentral.Panic (panic)
@@ -245,11 +246,13 @@ tyToShape col = go
         M.TyUint _ -> goPrim ty
         M.TyTuple _ -> goTuple ty
         M.TyClosure _ -> goTuple ty
+        M.TyCoroutineClosure _ -> goTuple ty
         -- `FnDef` is represented like an empty tuple
         M.TyFnDef _ -> Some $ TupleShape ty []
         M.TyArray ty' len | Some shp <- go ty' ->
           let elemSz = tySize col ty'
            in Some $ ArrayShape ty ty' elemSz shp (fromIntegral len)
+        M.TyCoroutine ca -> goCoroutine ty ca
         M.TyAdt nm _ _ -> case Map.lookup nm (col ^. M.adts) of
             Just adt | Just ty' <- reprTransparentFieldTy col adt ->
                 mapSome (TransparentShape ty) $ go ty'
@@ -349,6 +352,52 @@ tyToShape col = go
              Right (Some (FnPtrShape ty argsr retr)) of
           Left err -> error ("goFnPtr: " ++ err)
           Right x -> x
+
+    -- Coroutines are represented as a Crucible struct with fields for the
+    -- discriminant, upvars, and saved locals.  See Note [coroutine
+    -- representation] in Mir.TransTy.
+    goCoroutine :: M.Ty -> M.CoroutineArgs -> Some TypeShape
+    goCoroutine ty ca =
+        case coroutineFields col ca of
+          Left err -> error ("goCoroutine: " ++ err)
+          Right (Some _fieldCtx) ->
+            -- Build the list of MIR field types for the struct shape:
+            --   discr : discrTy
+            --   upvars : upvarTys (Optional if not canInitialize)
+            --   saved  : savedTys (always Optional)
+            let allFieldTys = [ca ^. M.caDiscrTy]
+                           ++ (ca ^. M.caUpvarTys)
+                           ++ (ca ^. M.caSavedTys)
+            in case goCoroutineFields ca of
+                 Some flds -> Some $ StructShape ty allFieldTys flds
+
+    -- Build FieldShape assignment for coroutine fields, matching the
+    -- wrapping logic in TransTy.coroutineFields:
+    --   discr + upvars: Optional only if not canInitialize
+    --   saved locals: always Optional
+    goCoroutineFields :: M.CoroutineArgs -> Some (Assignment FieldShape)
+    goCoroutineFields ca =
+      let discrTys = [ca ^. M.caDiscrTy]
+          upvarTys = ca ^. M.caUpvarTys
+          savedTys = ca ^. M.caSavedTys
+          normalFields = discrTys ++ upvarTys
+          -- Normal fields: Optional only if not canInitialize
+          normalFlds = map goField normalFields
+          -- Saved fields: always Optional
+          savedFlds = map goSavedField savedTys
+      in buildFieldAssignment (normalFlds ++ savedFlds)
+
+    -- Saved locals are always wrapped in MaybeType
+    goSavedField :: M.Ty -> Some FieldShape
+    goSavedField ty | Some shp <- go ty = Some $ OptField shp
+
+    buildFieldAssignment :: [Some FieldShape] -> Some (Assignment FieldShape)
+    buildFieldAssignment = foldl addField (Some Empty)
+      where
+        addField :: Some (Assignment FieldShape)
+                 -> Some FieldShape
+                 -> Some (Assignment FieldShape)
+        addField (Some acc) (Some fld) = Some (acc :> fld)
 
     -- Retrieve the field types in a variant. This used for both struct and enum
     -- variants.

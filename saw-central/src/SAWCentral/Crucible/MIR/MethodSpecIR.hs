@@ -73,6 +73,9 @@ module SAWCentral.Crucible.MIR.MethodSpecIR
   , MirIndexingMode(..)
   , MirFieldAccessMode(..)
 
+    -- * @MirVtableBinding@
+  , MirVtableBinding(..)
+
     -- * Initial CrucibleSetupMethodSpec
   , initialDefCrucibleMethodSpecIR
   , initialCrucibleSetupState
