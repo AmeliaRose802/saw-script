@@ -33,6 +33,7 @@ module SAWCentral.Crucible.JVM.Builtins
     , jvm_ghost_value
     , jvm_equal
     , jvm_unint
+    , jvm_subclasses
     ) where
 
 import           Control.Lens
@@ -1672,3 +1673,28 @@ groupOn ::
   (a -> b) {- ^ equivalence class projection -} ->
   [a] -> [NonEmpty a]
 groupOn f = NE.groupBy ((==) `on` f) . sortBy (compare `on` f)
+
+--------------------------------------------------------------------------------
+-- | Discover all transitive subclasses of a given JVM base class.
+-- Uses the Codebase's subclassMap which tracks direct subclass relationships.
+-- Returns a list of fully-qualified class names (slash-separated).
+jvm_subclasses :: J.Class -> Text -> TopLevel [String]
+jvm_subclasses _baseClass baseNameText = do
+    cb <- getJavaCodebase
+    cbState <- io $ readIORef (CB.stateRef cb)
+    let baseName = J.mkClassName (Text.unpack baseNameText)
+        scMap    = CB.subclassMap cbState
+        descendants = collectDescendants scMap baseName
+    io $ putStrLn $ "jvm_subclasses: found " ++ show (length descendants)
+                 ++ " subclass(es) of " ++ Text.unpack baseNameText ++ ":"
+    forM_ descendants $ \d -> io $ putStrLn $ "  " ++ J.unClassName d
+    return (map J.unClassName descendants)
+  where
+    collectDescendants :: Map J.ClassName [J.Class]
+                       -> J.ClassName -> [J.ClassName]
+    collectDescendants scMap parent =
+        case Map.lookup parent scMap of
+            Nothing -> []
+            Just directSubs ->
+                let directNames = map J.className directSubs
+                in  directNames ++ concatMap (collectDescendants scMap) directNames

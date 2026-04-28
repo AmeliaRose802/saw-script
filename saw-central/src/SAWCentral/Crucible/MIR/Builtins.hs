@@ -54,6 +54,12 @@ module SAWCentral.Crucible.MIR.Builtins
   , mir_mux_values
     -- ** Rust Vecs
   , mir_vec_of
+    -- ** Dyn Trait dispatch
+  , mir_bind_method
+    -- ** Coroutine construction
+  , mir_coroutine_value
+    -- ** MIR FFI overrides
+  , mir_override_extern
     -- ** MIR types
   , mir_adt
   , mir_array
@@ -815,6 +821,59 @@ mir_points_to_internal mode ref val =
 
 mir_unint :: [Text] -> MIRSetupM ()
 mir_unint term = MIRSetupM (Setup.declare_unint "mir_unint" mccUninterp term)
+
+-- | Bind a concrete implementation spec to a dyn Trait method for
+-- dynamic dispatch verification.  When verifying a function that calls
+-- a trait method through a dyn Trait reference, this binding tells
+-- SAW which concrete implementation to use as the override.
+--
+-- Parameters:
+--   trait_method  — the trait method name (e.g., "MyTrait::method")
+--   impl_name    — the concrete implementation function name
+mir_bind_method ::
+  Text           {- ^ trait method name -} ->
+  Text           {- ^ implementation function name -} ->
+  MIRSetupM ()
+mir_bind_method traitMethod implName =
+  MIRSetupM $
+    Setup.addVtableBinding $ MirVtableBinding
+      { mirVtableBindTraitMethod = traitMethod
+      , mirVtableBindImplName    = implName
+      }
+
+-- | Construct a coroutine value from a discriminant value and a list of
+-- field values (upvars + saved locals).  This is used to set up the
+-- initial state of an async function's coroutine for verification.
+--
+-- Parameters:
+--   discr  — the discriminant value (indicates coroutine state)
+--   fields — list of field setup values (upvars then saved locals)
+--
+-- Returns a SetupValue representing the constructed coroutine struct.
+mir_coroutine_value ::
+  SetupValue   {- ^ discriminant -} ->
+  [SetupValue] {- ^ field values (upvars + saved locals) -} ->
+  MIRSetupM SetupValue
+mir_coroutine_value discr fields = MIRSetupM $ do
+  -- Coroutines are represented as structs in Crucible, so we construct
+  -- a tuple of (discr, field1, field2, ...).  The caller is responsible
+  -- for providing the correct number and types of fields.
+  let allFields = discr : fields
+  pure $ MS.SetupTuple () allFields
+
+-- | Override an extern (FFI) function in a MIR module with a SAW spec.
+-- This is used when verifying Rust code that calls C functions via FFI.
+--
+-- Parameters:
+--   rm       — the loaded MIR module
+--   fn_name  — name of the extern function to override
+--   spec     — the SAWScript setup block providing the spec
+mir_override_extern ::
+  Mir.RustModule ->
+  Text           {- ^ extern function name -} ->
+  MIRSetupM ()   {- ^ spec for the extern function -} ->
+  TopLevel Lemma
+mir_override_extern rm fnName setup = mir_unsafe_assume_spec rm fnName setup
 
 -- | Perform a set of validity checks on the LHS reference or pointer value in a
 -- 'mir_points_to' or 'mir_points_to_multi' command. In particular:

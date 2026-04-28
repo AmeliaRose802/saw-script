@@ -1,0 +1,67 @@
+// polymorphic_verify.saw — helpers for polymorphic (subclass) verification
+//
+// Usage:
+//   enable_experimental;
+//   include "lib/polymorphic_verify.saw";
+//   m <- llvm_load_module "module.bc";
+//   results <- llvm_verify_polymorphic m "Shape" "area" [] false
+//     (\cls -> area_spec_for cls) z3;
+
+// llvm_verify_polymorphic
+//   Automatically discovers all subclasses of `base_class` in the module
+//   and runs `llvm_verify` for each, using the user-supplied `mk_spec`
+//   function to generate the spec for each class.
+//
+// Parameters:
+//   mod        : LLVMModule  — the loaded LLVM module
+//   base_class : String      — base class name (e.g., "Shape")
+//   method     : String      — method name without class prefix (e.g., "area")
+//   lemmas     : [LLVMSpec]  — override lemmas passed to each verify call
+//   check_sat  : Bool        — path satisfiability checking
+//   mk_spec    : String -> LLVMSetup ()  — given a class name, returns the spec
+//   tactic     : ProofScript ()          — proof tactic (e.g., z3)
+//
+// Returns: list of LLVMSpec (one per subclass)
+let llvm_verify_polymorphic mod base_class method lemmas check_sat mk_spec tactic = do {
+    subs <- llvm_subclasses mod base_class;
+    results <- for subs (\cls -> do {
+        print (str_concat "llvm_verify_polymorphic: verifying "
+               (str_concat cls (str_concat "::" method)));
+        let spec = mk_spec cls;
+        // Construct Itanium-ABI mangled name: _ZN<len><class><len><method>Ev
+        let cls_len = show (length cls);
+        let meth_len = show (length method);
+        let mangled = str_concat "_ZN"
+                        (str_concat cls_len
+                          (str_concat cls
+                            (str_concat meth_len
+                              (str_concat method "Ev"))));
+        print (str_concat "  mangled name: " mangled);
+        ov <- llvm_verify mod mangled lemmas check_sat spec tactic;
+        return ov;
+    });
+    return results;
+};
+
+// llvm_verify_subclasses
+//   Lower-level helper: takes a list of (mangled_name, spec) pairs instead
+//   of computing the mangled name automatically.
+//
+// Parameters:
+//   mod       : LLVMModule
+//   pairs     : [(String, LLVMSetup ())]  — list of (mangled_name, spec)
+//   lemmas    : [LLVMSpec]
+//   check_sat : Bool
+//   tactic    : ProofScript ()
+//
+// Returns: list of LLVMSpec
+let llvm_verify_subclasses mod pairs lemmas check_sat tactic = do {
+    results <- for pairs (\pair -> do {
+        let name = pair.0;
+        let spec = pair.1;
+        print (str_concat "llvm_verify_subclasses: verifying " name);
+        ov <- llvm_verify mod name lemmas check_sat spec tactic;
+        return ov;
+    });
+    return results;
+};

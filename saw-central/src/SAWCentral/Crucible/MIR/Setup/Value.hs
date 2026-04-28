@@ -72,6 +72,9 @@ module SAWCentral.Crucible.MIR.Setup.Value
     -- * @MirIndexingMode@, @MirFieldAccessMode@
   , MirIndexingMode(..)
   , MirFieldAccessMode(..)
+
+    -- * @MirVtableBinding@
+  , MirVtableBinding(..)
   ) where
 
 import Control.Lens (makeLenses)
@@ -120,6 +123,18 @@ type instance MS.PointsTo MIR = MirPointsTo
 type instance MS.ResolvedState MIR = ()
 
 type instance MS.Codebase MIR = CollectionState
+
+-- | A binding that associates a dyn Trait method with a concrete implementation
+-- spec, for use in dynamic dispatch verification.
+data MirVtableBinding = MirVtableBinding
+  { mirVtableBindTraitMethod :: Text
+    -- ^ The trait method name (e.g., "MyTrait::method")
+  , mirVtableBindImplName    :: Text
+    -- ^ The concrete implementation function name
+  }
+  deriving (Show)
+
+type instance MS.VtableBinding MIR = MirVtableBinding
 
 data MIRCrucibleContext =
   MIRCrucibleContext

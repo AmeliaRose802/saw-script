@@ -6095,6 +6095,21 @@ primitives = Map.fromList $
     , "variable, or a reference to an external."
     ]
 
+  , prim "llvm_subclasses"    "LLVMModule -> String -> TopLevel [String]"
+    (pureVal llvm_subclasses)
+    Experimental
+    [ "Discover all transitive subclasses of the named C++ base class by"
+    , "parsing RTTI (typeinfo) metadata in the LLVM module."
+    , ""
+    , "Returns a list of class names that derive (directly or indirectly)"
+    , "from the given base class.  Useful for polymorphic verification:"
+    , ""
+    , "  subs <- llvm_subclasses m \"Shape\";"
+    , "  // subs = [\"Circle\", \"Rectangle\"]"
+    , ""
+    , "Requires 'enable_experimental'."
+    ]
+
     ------------------------------------------------------------
     -- LLVM verification
 
@@ -6857,6 +6872,22 @@ primitives = Map.fromList $
     , "returned by jvm_verify but without performing any verification."
     ]
 
+  , prim "jvm_subclasses"    "JavaClass -> String -> TopLevel [String]"
+    (pureVal jvm_subclasses)
+    Experimental
+    [ "Discover all transitive subclasses of the named JVM base class"
+    , "using the codebase's class hierarchy metadata."
+    , ""
+    , "Returns a list of fully-qualified class names that extend or"
+    , "implement the given base class, directly or indirectly."
+    , ""
+    , "  cls <- java_load_class \"com/example/Shape\";"
+    , "  subs <- jvm_subclasses cls \"com/example/Shape\";"
+    , "  // subs = [\"com/example/Circle\", \"com/example/Rectangle\"]"
+    , ""
+    , "Requires 'enable_experimental'."
+    ]
+
     ------------------------------------------------------------
     -- MIR types
 
@@ -7500,6 +7531,52 @@ primitives = Map.fromList $
     Current
     [ "Return a MIRSpec corresponding to a MIRSetup block, as would be"
     , "returned by mir_verify but without performing any verification."
+    ]
+
+  , prim "mir_bind_method"
+    "String -> String -> MIRSetup ()"
+    (pureVal mir_bind_method)
+    Experimental
+    [ "Bind a concrete implementation to a dyn Trait method for"
+    , "dynamic dispatch verification."
+    , ""
+    , "  mir_bind_method \"MyTrait::method\" \"MyStruct::method\";"
+    , ""
+    , "When verifying code that calls trait methods through dyn Trait"
+    , "references, this tells SAW which concrete implementation to"
+    , "use as the override for the given trait method."
+    , ""
+    , "Requires 'enable_experimental'."
+    ]
+
+  , prim "mir_coroutine_value"
+    "MIRValue -> [MIRValue] -> MIRSetup MIRValue"
+    (pureVal mir_coroutine_value)
+    Experimental
+    [ "Construct a coroutine (async state machine) value from a"
+    , "discriminant and a list of field values (upvars + saved locals)."
+    , ""
+    , "  let state = mir_coroutine_value discr [upvar1, saved1, saved2];"
+    , ""
+    , "The discriminant indicates the coroutine's current state (e.g.,"
+    , "0 = unresumed, 1 = suspended, 3 = returned).  Fields should be"
+    , "provided in order: upvars first, then saved locals."
+    , ""
+    , "Requires 'enable_experimental'."
+    ]
+
+  , prim "mir_override_extern"
+    "MIRModule -> String -> MIRSetup () -> TopLevel MIRSpec"
+    (pureVal mir_override_extern)
+    Experimental
+    [ "Override an extern (FFI) function in a MIR module with a SAW spec."
+    , "This is used when verifying Rust code that calls C functions via FFI."
+    , ""
+    , "  ffi_ov <- mir_override_extern m \"my_c_function\" my_spec;"
+    , ""
+    , "The returned spec can be used as an override in mir_verify."
+    , ""
+    , "Requires 'enable_experimental'."
     ]
 
     ------------------------------------------------------------

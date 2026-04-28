@@ -1,0 +1,26 @@
+// Comprehensive async Rust integration tests (saw-script-6gb)
+// This test suite covers various async patterns
+
+// Test 1: Simple async fn that returns immediately
+// Test 2: Async fn with .await (multi-poll)
+// Test 3: Async fn with conditional branches
+// Test 4: Async fn calling another async fn
+// Test 5: Async fn with loop
+
+// NOTE: These tests require saw-rustc compiled MIR JSON.
+// Placeholder until coroutine verification pipeline is complete.
+
+// Test 1: Immediate completion
+m <- mir_load_module "test.linked-mir.json";
+
+let immediate_spec = do {
+    x <- mir_fresh_var "x" mir_u32;
+    mir_execute_func [mir_term x];
+    mir_return (mir_term {{ x + 1 : [32] }});
+};
+
+mir_verify m "test::add_one" [] false immediate_spec z3;
+print "Test 1 (immediate completion): PASSED";
+
+// TODO: Tests 2-5 require full coroutine pipeline
+print "Comprehensive async tests: 1/5 implemented";

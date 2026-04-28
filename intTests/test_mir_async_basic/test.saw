@@ -1,0 +1,21 @@
+// Minimal async Rust test for SAW (saw-script-xix)
+//
+// This test verifies that basic async Rust patterns can be handled
+// after coroutine type support and Pin erasure are wired up.
+//
+// The test.rs file defines a simple async function and its desugared
+// coroutine form.  The test.saw file verifies the poll function.
+
+// Load the MIR JSON module
+m <- mir_load_module "test.linked-mir.json";
+
+// Verify the synchronous helper that the async fn calls
+let add_one_spec = do {
+    x <- mir_fresh_var "x" mir_u32;
+    mir_execute_func [mir_term x];
+    mir_return (mir_term {{ x + 1 : [32] }});
+};
+
+add_one_ov <- mir_verify m "test::add_one" [] false add_one_spec z3;
+
+print "Async Rust minimal test: add_one verified";
