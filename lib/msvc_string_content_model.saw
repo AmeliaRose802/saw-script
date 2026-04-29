@@ -1,0 +1,289 @@
+/*
+ * SAW overrides for MSVC std::basic_string operations that use the
+ * symbolic string content model from StringModel.cry.
+ *
+ * Instead of modelling string operations as no-ops (msvc_string_overrides)
+ * or unconstrained fresh values (msvc_string_content_overrides), these
+ * overrides use Cryptol specifications that track string content as
+ * symbolic byte arrays.  This lets the SMT solver reason about:
+ *
+ *   - Whether two strings are equal (string_equal)
+ *   - Lexicographic ordering (string_compare)
+ *   - Substring extraction (string_substr)
+ *   - Pattern search (string_find)
+ *
+ * MSVC SSO layout (std::basic_string on x86-64 MSVC):
+ *   bytes[ 0..15] = union { char _Buf[16]; char* _Ptr; }
+ *   bytes[16..23] = size_t _Mysize  (logical length)
+ *   bytes[24..31] = size_t _Myres   (capacity; if < 16 → SSO active)
+ *
+ * Since SAW cannot model the discriminated union, we replace the entire
+ * string object with a flat struct { [16 x i8], i64, i64 } and keep
+ * a full 256-byte symbolic content term in the Cryptol domain.
+ *
+ * Usage:
+ *   include "msvc_string_content_model.saw";
+ *
+ *   m <- llvm_load_module "my_program.bc";
+ *
+ *   // Register content-aware overrides
+ *   size_ov <- llvm_verify m msvc_size    [] false string_size_spec    z3;
+ *   cmp_ov  <- llvm_verify m msvc_compare [] false string_compare_spec z3;
+ *   eq_ov   <- llvm_verify m msvc_eq      [] false string_equal_spec   z3;
+ *   find_ov <- llvm_verify m msvc_find    [] false string_find_spec    z3;
+ *
+ *   // Or use llvm_unsafe_assume_spec for functions not in the bitcode
+ *   cmp_ov <- llvm_unsafe_assume_spec m msvc_compare string_compare_spec;
+ *
+ *   // Then use compositionally
+ *   llvm_verify m "?MyFunction@@..."
+ *     [size_ov, cmp_ov, eq_ov, find_ov]
+ *     false my_function_spec z3;
+ */
+
+import "StringModel.cry";
+
+// ===================================================================
+// Type aliases
+// ===================================================================
+
+let i8  = llvm_int 8;
+let i32 = llvm_int 32;
+let i64 = llvm_int 64;
+
+// The MSVC std::string in-memory layout as an LLVM struct.
+// Field 0: [16 x i8]  — SSO inline buffer (or first 8 bytes = heap ptr)
+// Field 1: i64         — _Mysize (logical length)
+// Field 2: i64         — _Myres  (capacity)
+let msvc_string_layout = llvm_struct_type [llvm_array 16 i8, i64, i64];
+
+// ===================================================================
+// MSVC mangled names
+// ===================================================================
+
+// std::basic_string<char>::size() const
+let msvc_size    = "?size@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QEBA_KXZ";
+
+// std::basic_string<char>::length() const
+let msvc_length  = "?length@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QEBA_KXZ";
+
+// std::basic_string<char>::compare(const basic_string&) const
+let msvc_compare = "?compare@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QEBAHAEAV12@@Z";
+
+// std::basic_string<char>::find(const basic_string&, size_t) const
+let msvc_find    = "?find@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QEBA_KAEAV12@_K@Z";
+
+// std::basic_string<char>::substr(size_t, size_t) const
+let msvc_substr  = "?substr@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QEBA?AV12@_K0@Z";
+
+// operator==(const basic_string&, const basic_string&)
+let msvc_eq      = "??8std@@YA_NAEBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@0@0@Z";
+
+// GCC/Clang (Itanium ABI) equivalents — uncomment if targeting libstdc++
+// let itanium_size    = "_ZNKSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE4sizeEv";
+// let itanium_length  = "_ZNKSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE6lengthEv";
+// let itanium_compare = "_ZNKSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE7compareERKS4_";
+// let itanium_find    = "_ZNKSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE4findERKS4_m";
+// let itanium_substr  = "_ZNKSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE6substrEmm";
+// let itanium_eq      = "_ZSteqIcSt11char_traitsIcESaIcEEbRKNSt7__cxx1112basic_stringIT_T0_T1_EESA_";
+
+// ===================================================================
+// Helper: allocate a fresh symbolic MSVC string
+// ===================================================================
+
+/**
+ * Create a fresh symbolic string for use in override specifications.
+ *
+ * Allocates the MSVC string object (32 bytes) and fills it with:
+ *   - A fresh 256-byte symbolic content buffer
+ *   - A fresh i64 length with precondition len <= 256
+ *   - The first 16 bytes of content in the SSO inline buffer
+ *   - Length and capacity in the struct fields
+ *
+ * Returns a record:
+ *   { this_ptr : LLVMSetup pointer   -- pointer to the string object
+ *   , content  : Term [256][8]        -- symbolic content
+ *   , len      : Term [64]            -- symbolic length
+ *   }
+ */
+let fresh_string_content name = do {
+    // Full symbolic content (256 bytes for the Cryptol model)
+    content <- llvm_fresh_var (str_concat name "_content")
+                              (llvm_array 256 i8);
+    // Symbolic length
+    len <- llvm_fresh_var (str_concat name "_len") i64;
+
+    // Precondition: length must be within model bounds
+    llvm_precond {{ len <= 256 }};
+
+    // Allocate the MSVC string object
+    this_ptr <- llvm_alloc msvc_string_layout;
+
+    // Populate the struct:
+    //   field 0: first 16 bytes of content (SSO inline buffer)
+    //   field 1: length (_Mysize)
+    //   field 2: capacity (_Myres) — set to 256 for our model
+    let sso_bytes = {{ take`{16} content }};
+    llvm_points_to this_ptr
+        (llvm_struct_value [ llvm_term sso_bytes
+                           , llvm_term len
+                           , llvm_term {{ 256 : [64] }}
+                           ]);
+
+    return { this_ptr = this_ptr
+           , content  = content
+           , len      = len
+           };
+};
+
+// ===================================================================
+// Override: string::size() / string::length()
+// ===================================================================
+// size_t size() const;
+// size_t length() const;
+//   Returns the logical length from the StringContent model.
+
+let string_size_spec = do {
+    s <- fresh_string_content "s";
+
+    llvm_execute_func [ s.this_ptr ];
+
+    llvm_return (llvm_term {{ string_length (mk_string s.content s.len) }});
+};
+
+// ===================================================================
+// Override: string::compare(const basic_string&) const
+// ===================================================================
+// int compare(const basic_string& str) const;
+//   Lexicographic comparison using the Cryptol string_compare spec.
+//   Returns -1, 0, or 1 as i32.
+
+let string_compare_spec = do {
+    lhs <- fresh_string_content "lhs";
+    rhs <- fresh_string_content "rhs";
+
+    llvm_execute_func [ lhs.this_ptr, rhs.this_ptr ];
+
+    let result = {{ string_compare (mk_string lhs.content lhs.len)
+                                   (mk_string rhs.content rhs.len) }};
+    llvm_return (llvm_term result);
+};
+
+// ===================================================================
+// Override: operator==(const basic_string&, const basic_string&)
+// ===================================================================
+// bool operator==(const basic_string& lhs, const basic_string& rhs);
+//   Returns true (i8 1) if strings are equal, false (i8 0) otherwise.
+//   LLVM represents bool as i8 in the MSVC ABI.
+
+let string_equal_spec = do {
+    lhs <- fresh_string_content "lhs";
+    rhs <- fresh_string_content "rhs";
+
+    llvm_execute_func [ lhs.this_ptr, rhs.this_ptr ];
+
+    let result = {{ if string_equal (mk_string lhs.content lhs.len)
+                                    (mk_string rhs.content rhs.len)
+                    then 1 : [8]
+                    else 0 : [8] }};
+    llvm_return (llvm_term result);
+};
+
+// ===================================================================
+// Override: string::find(const basic_string&, size_t) const
+// ===================================================================
+// size_t find(const basic_string& str, size_t pos = 0) const;
+//   Searches for the first occurrence of str starting at pos.
+//   Returns the index or npos (~0).
+
+let string_find_spec = do {
+    hay <- fresh_string_content "hay";
+    ndl <- fresh_string_content "ndl";
+    start <- llvm_fresh_var "start" i64;
+
+    llvm_execute_func [ hay.this_ptr, ndl.this_ptr, llvm_term start ];
+
+    let result = {{ string_find_from (mk_string hay.content hay.len)
+                                     (mk_string ndl.content ndl.len)
+                                     start }};
+    llvm_return (llvm_term result);
+};
+
+// ===================================================================
+// Override: string::substr(size_t, size_t) const
+// ===================================================================
+// basic_string substr(size_t pos = 0, size_t count = npos) const;
+//   Returns a new string via sret (first hidden parameter on MSVC x64).
+//   The sret pointer receives the result string object.
+
+let string_substr_spec = do {
+    // sret: caller-allocated space for the returned string
+    ret_ptr <- llvm_alloc msvc_string_layout;
+
+    // Source string
+    src <- fresh_string_content "src";
+
+    // Position and count arguments
+    pos   <- llvm_fresh_var "pos"   i64;
+    count <- llvm_fresh_var "count" i64;
+
+    llvm_execute_func [ ret_ptr, src.this_ptr,
+                        llvm_term pos, llvm_term count ];
+
+    // Compute the result via Cryptol spec
+    let result = {{ string_substr (mk_string src.content src.len)
+                                  pos count }};
+
+    // Write the result into the sret-allocated string object
+    let ret_sso = {{ take`{16} result.content }};
+    llvm_points_to ret_ptr
+        (llvm_struct_value [ llvm_term ret_sso
+                           , llvm_term {{ result.len }}
+                           , llvm_term {{ 256 : [64] }}
+                           ]);
+
+    // substr returns the sret pointer on MSVC
+    llvm_return ret_ptr;
+};
+
+// ===================================================================
+// Convenience: register all content-aware overrides
+// ===================================================================
+
+/**
+ * Register all string content overrides against an LLVM module.
+ * Returns a list of override values for use in llvm_verify.
+ *
+ * Example:
+ *   m <- llvm_load_module "program.bc";
+ *   str_ovs <- register_string_content_overrides m;
+ *   llvm_verify m "?MyFunc@@..." str_ovs false my_spec z3;
+ *
+ * If a mangled name is not found in the bitcode, the corresponding
+ * llvm_unsafe_assume_spec is used instead (no verification of the
+ * override itself, but still provides the Cryptol-backed model to
+ * downstream proofs).
+ */
+
+/*
+ * NOTE: The register function below uses llvm_unsafe_assume_spec
+ * because the actual std::string method bodies are typically not
+ * available or not analyzable in the bitcode.  The content model
+ * is sound as long as the Cryptol specs faithfully capture the
+ * semantics of the C++ operations.
+ *
+ * To verify an override against actual bitcode (e.g. a test stub),
+ * replace llvm_unsafe_assume_spec with llvm_verify:
+ *
+ *   cmp_ov <- llvm_verify m msvc_compare [] false string_compare_spec z3;
+ */
+let assume_string_content_overrides m = do {
+    size_ov    <- llvm_unsafe_assume_spec m msvc_size    string_size_spec;
+    length_ov  <- llvm_unsafe_assume_spec m msvc_length  string_size_spec;
+    compare_ov <- llvm_unsafe_assume_spec m msvc_compare string_compare_spec;
+    equal_ov   <- llvm_unsafe_assume_spec m msvc_eq      string_equal_spec;
+    find_ov    <- llvm_unsafe_assume_spec m msvc_find    string_find_spec;
+    substr_ov  <- llvm_unsafe_assume_spec m msvc_substr  string_substr_spec;
+
+    return [ size_ov, length_ov, compare_ov, equal_ov, find_ov, substr_ov ];
+};

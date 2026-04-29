@@ -1,0 +1,188 @@
+/*
+ * Cryptol specifications for symbolic std::string content modelling.
+ *
+ * SAW cannot represent the MSVC/libstdc++ Small String Optimization (SSO)
+ * discriminated union.  This module defines a flat symbolic model:
+ *
+ *   StringContent = { content : [256][8], len : [64] }
+ *
+ * All SAW overrides for string-dependent operations (compare, find, substr,
+ * equality) use these specs so that the solver can reason about the
+ * relationship between string content and function results.
+ *
+ * The 256-byte limit is a practical bound for verification — it covers
+ * virtually all fixed-size protocol strings (HMAC hex, dates, claims,
+ * authorization headers) while keeping the symbolic state tractable.
+ */
+module StringModel where
+
+/* ================================================================== */
+/* Core type                                                          */
+/* ================================================================== */
+
+/**
+ * A symbolic string: a 256-byte content buffer and a logical length.
+ * Only the first `len` bytes of `content` are meaningful; the rest
+ * may be arbitrary symbolic values.
+ */
+type StringContent = { content : [256][8], len : [64] }
+
+/* ================================================================== */
+/* Constructor helpers                                                */
+/* ================================================================== */
+
+/** Build a StringContent from raw terms (for SAW override use). */
+mk_string : [256][8] -> [64] -> StringContent
+mk_string c l = { content = c, len = l }
+
+/** An empty string. */
+empty_string : StringContent
+empty_string = { content = zero, len = 0 }
+
+/** Construct from a fixed-size byte literal. */
+from_bytes : {n} (fin n, n <= 256) => [n][8] -> StringContent
+from_bytes bs = { content = bs # (zero : [256 - n][8]), len = `n }
+
+/* ================================================================== */
+/* Observers                                                          */
+/* ================================================================== */
+
+/** Return the logical length. */
+string_length : StringContent -> [64]
+string_length s = s.len
+
+/* ================================================================== */
+/* Equality                                                           */
+/* ================================================================== */
+
+/**
+ * Two strings are equal iff they have the same length and their
+ * first `len` bytes match.  Bytes beyond `len` are ignored.
+ */
+string_equal : StringContent -> StringContent -> Bit
+string_equal a b =
+    a.len == b.len /\
+    foldl (/\) True
+          [ if i < a.len then a.content @ i == b.content @ i else True
+          | i <- [0 .. 255] : [256][64]
+          ]
+
+/* ================================================================== */
+/* Lexicographic comparison                                           */
+/* ================================================================== */
+
+/**
+ * Lexicographic compare — returns -1, 0, or 1 as a signed i32,
+ * matching the contract of std::string::compare.
+ */
+string_compare : StringContent -> StringContent -> [32]
+string_compare a b =
+    if pfx_lt a.content b.content cmp_len
+    then -1
+    else if pfx_lt b.content a.content cmp_len
+         then 1
+         else if a.len < b.len then -1
+              else if a.len > b.len then 1
+                   else 0
+  where cmp_len = min a.len b.len
+
+private
+  pfx_lt : [256][8] -> [256][8] -> [64] -> Bit
+  pfx_lt xs ys len =
+      foldl (||) False
+            [ (i < len) && (eq_before xs ys i len) && (xs @ i < ys @ i)
+            | i <- [0 .. 255] : [256][64]
+            ]
+
+  eq_before : [256][8] -> [256][8] -> [64] -> [64] -> Bit
+  eq_before xs ys idx len =
+      foldl (&&) True
+            [ if j < idx && j < len then xs @ j == ys @ j else True
+            | j <- [0 .. 255] : [256][64]
+            ]
+
+/* ================================================================== */
+/* Substring                                                          */
+/* ================================================================== */
+
+/**
+ * Extract a substring starting at `pos` for up to `count` bytes.
+ * Clamps out-of-range positions (matches SAW-friendly semantics;
+ * the real std::string::substr throws on out-of-range, but SAW
+ * proofs typically guard against that).
+ */
+string_substr : StringContent -> [64] -> [64] -> StringContent
+string_substr s pos count = { content = new_buf, len = new_len }
+  where
+    actual_pos   = if pos > s.len then s.len else pos
+    remaining    = s.len - actual_pos
+    actual_count = if count > remaining then remaining else count
+    new_len      = actual_count
+    new_buf      = [ if i < actual_count
+                     then s.content @ (actual_pos + i)
+                     else 0
+                   | i <- [0 .. 255] : [256][64]
+                   ]
+
+/* ================================================================== */
+/* Find                                                               */
+/* ================================================================== */
+
+/** std::string::npos — the "not found" sentinel. */
+npos : [64]
+npos = ~0
+
+/**
+ * Search for the first occurrence of `needle` in `haystack`,
+ * starting from position 0.  Returns the byte index or `npos`.
+ */
+string_find : StringContent -> StringContent -> [64]
+string_find haystack needle = string_find_from haystack needle 0
+
+/**
+ * Search for the first occurrence of `needle` in `haystack`,
+ * starting from position `start`.  Used by the SAW override
+ * for std::string::find(const string&, size_t).
+ */
+string_find_from : StringContent -> StringContent -> [64] -> [64]
+string_find_from haystack needle start =
+    if needle.len == 0
+    then (if start <= haystack.len then start else haystack.len)
+    else foldl pick npos
+              [ (i, match_at i)
+              | i <- [0 .. 255] : [256][64]
+              ]
+  where
+    pick best (i, True)  = if i < best then i else best
+    pick best (_, False)  = best
+
+    match_at pos =
+        (pos >= start) &&
+        (pos + needle.len <= haystack.len) &&
+        foldl (&&) True
+              [ if j < needle.len
+                then haystack.content @ (pos + j) == needle.content @ j
+                else True
+              | j <- [0 .. 255] : [256][64]
+              ]
+
+/* ================================================================== */
+/* Append                                                             */
+/* ================================================================== */
+
+/**
+ * Concatenate two strings.  Truncates at 256 bytes if the combined
+ * length exceeds the model buffer.
+ */
+string_append : StringContent -> StringContent -> StringContent
+string_append a b = { content = new_buf, len = new_len }
+  where
+    total   = a.len + b.len
+    new_len = if total > 256 then 256 else total
+    new_buf = [ if i < a.len
+                then a.content @ i
+                else if i < new_len
+                     then b.content @ (i - a.len)
+                     else 0
+              | i <- [0 .. 255] : [256][64]
+              ]
