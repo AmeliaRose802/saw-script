@@ -1678,23 +1678,8 @@ groupOn f = NE.groupBy ((==) `on` f) . sortBy (compare `on` f)
 -- | Discover all transitive subclasses of a given JVM base class.
 -- Uses the Codebase's subclassMap which tracks direct subclass relationships.
 -- Returns a list of fully-qualified class names (slash-separated).
-jvm_subclasses :: J.Class -> Text -> TopLevel [String]
+-- NOTE: Stubbed out — JVM Codebase does not expose stateRef/subclassMap.
+jvm_subclasses :: J.Class -> Text -> TopLevel [Text]
 jvm_subclasses _baseClass baseNameText = do
-    cb <- getJavaCodebase
-    cbState <- io $ readIORef (CB.stateRef cb)
-    let baseName = J.mkClassName (Text.unpack baseNameText)
-        scMap    = CB.subclassMap cbState
-        descendants = collectDescendants scMap baseName
-    io $ putStrLn $ "jvm_subclasses: found " ++ show (length descendants)
-                 ++ " subclass(es) of " ++ Text.unpack baseNameText ++ ":"
-    forM_ descendants $ \d -> io $ putStrLn $ "  " ++ J.unClassName d
-    return (map J.unClassName descendants)
-  where
-    collectDescendants :: Map J.ClassName [J.Class]
-                       -> J.ClassName -> [J.ClassName]
-    collectDescendants scMap parent =
-        case Map.lookup parent scMap of
-            Nothing -> []
-            Just directSubs ->
-                let directNames = map J.className directSubs
-                in  directNames ++ concatMap (collectDescendants scMap) directNames
+    io $ putStrLn $ "jvm_subclasses: not yet supported (" ++ Text.unpack baseNameText ++ ")"
+    return []
