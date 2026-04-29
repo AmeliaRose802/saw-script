@@ -22,7 +22,8 @@ module SAWCentral.LLVMBuiltins (
       llvm_pointer,
       llvm_struct_type,
       llvm_vtable_slots,
-      llvm_subclasses
+      llvm_subclasses,
+      llvm_symbol_exists
   ) where
 
 import Data.String
@@ -103,6 +104,16 @@ llvm_pointer = LLVM.PtrTo
 
 llvm_struct_type :: [LLVM.Type] -> LLVM.Type
 llvm_struct_type = LLVM.Struct
+
+-- | Check whether a symbol (function, global, or extern) exists in the LLVM module.
+llvm_symbol_exists :: Some CMS.LLVMModule -> Text -> Bool
+llvm_symbol_exists (Some llvmMod) symNameText =
+  let symName = Text.unpack symNameText
+      ast = CMS.modAST llvmMod
+      defNames  = map (show . LLVM.defName)   (LLVM.modDefines ast)
+      declNames = map (show . LLVM.decName)    (LLVM.modDeclares ast)
+      globNames = map (show . LLVM.globalSym)  (LLVM.modGlobals ast)
+  in symName `elem` defNames || symName `elem` declNames || symName `elem` globNames
 
 -- | Display the vtable layout for classes matching the given pattern.
 --
@@ -234,7 +245,7 @@ describeValue val = case val of
 --
 -- > subs <- llvm_subclasses m "Shape"
 -- > -- subs = ["Circle", "Rectangle"]
-llvm_subclasses :: Some CMS.LLVMModule -> Text -> TopLevel [String]
+llvm_subclasses :: Some CMS.LLVMModule -> Text -> TopLevel [Text]
 llvm_subclasses (Some llvmMod) baseClassText = do
   let baseClass = Text.unpack baseClassText
       ast       = CMS.modAST llvmMod
@@ -256,7 +267,7 @@ llvm_subclasses (Some llvmMod) baseClassText = do
     else do
       forM_ descendants $ \cls ->
         printOutLnTop Info $ "  subclass: " ++ cls
-      return descendants
+      return (map Text.pack descendants)
 
 -- | A typeinfo entry: (className, Maybe parentClassName).
 type TypeinfoEntry = (String, Maybe String)

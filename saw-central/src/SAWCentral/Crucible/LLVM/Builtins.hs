@@ -171,7 +171,9 @@ import qualified SAWSupport.Pretty as PPS
 
 -- saw-core
 import SAWCore.FiniteValue (prettyFirstOrderValue)
-import SAWCore.Name (VarName(..))
+import SAWCore.Module (ResolvedName(..), lookupVarIndexInMap, Def(defBody))
+import SAWCore.Name (VarName(..), nameIndex)
+import SAWCore.Prelude (scEq)
 import SAWCore.SharedTerm
 import SAWCore.Recognizer
 import qualified SAWCore.QualName as QN
@@ -1881,7 +1883,7 @@ verifySimulateWithFixpoint opts cc pfs fixpointSel mspec args assumes top_loc le
                   result_condition <- bindSAWTerm sym sawst W4.BaseBoolRepr induction_step_condition
                   return (result_substitution, result_condition)
            return ([f], Nothing)
-         SimpleFixpointCHC func -> do
+         SimpleFixpointCHC func -> withKnownNat ?ptrWidth $ do
            (f, ref) <- Crucible.LLVM.FixpointCHC.simpleLoopFixpoint sym cfg mvar $ Just $
              \fixpoint_substitution condition ->
                do let fixpoint_substitution_as_list = reverse $ MapF.toList fixpoint_substitution
