@@ -12,6 +12,7 @@ Stability   : provisional
 module SAWCentral.LLVMBuiltins (
       llvm_load_module,
       llvm_combine_modules,
+      llvm_strip_unreferenced_globals,
       llvm_type,
       llvm_int,
       llvm_float,
@@ -43,6 +44,7 @@ import qualified Text.LLVM.Parser as LLVM (parseType)
 import qualified SAWCentral.Crucible.LLVM.CrucibleLLVM as CL
 import qualified SAWCentral.Crucible.LLVM.MethodSpecIR as CMS (LLVMModule, loadLLVMModule
                                                               , combineLLVMModules
+                                                              , stripUnreferencedGlobals
                                                               , modAST)
 import SAWCentral.Options
 import SAWCentral.Value as SV
@@ -74,6 +76,18 @@ llvm_combine_modules main others =
                         }
      halloc <- getHandleAlloc
      io $ CMS.combineLLVMModules halloc main others
+
+llvm_strip_unreferenced_globals :: Some CMS.LLVMModule
+                                -> TopLevel (Some CMS.LLVMModule)
+llvm_strip_unreferenced_globals modl =
+  do laxArith <- gets rwLaxArith
+     debugIntrinsics <- gets rwDebugIntrinsics
+     let ?transOpts = CL.defaultTranslationOptions
+                        { CL.laxArith = laxArith
+                        , CL.debugIntrinsics = debugIntrinsics
+                        }
+     halloc <- getHandleAlloc
+     io $ CMS.stripUnreferencedGlobals halloc modl
 
 llvm_type :: Text -> TopLevel LLVM.Type
 llvm_type str =

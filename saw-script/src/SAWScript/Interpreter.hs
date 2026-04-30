@@ -2479,6 +2479,10 @@ do_llvm_combine_modules :: Some CIR.LLVMModule -> [Some CIR.LLVMModule]
                         -> TopLevel (Some CIR.LLVMModule)
 do_llvm_combine_modules = llvm_combine_modules
 
+do_llvm_strip_unreferenced_globals :: Some CIR.LLVMModule
+                                   -> TopLevel (Some CIR.LLVMModule)
+do_llvm_strip_unreferenced_globals = llvm_strip_unreferenced_globals
+
 do_llvm_boilerplate :: Text -> ModuleSkeleton -> Bool -> TopLevel ()
 do_llvm_boilerplate path mskel builtins =
   llvm_boilerplate (Text.unpack path) mskel builtins
@@ -6022,6 +6026,17 @@ primitives = Map.fromList $
     , "with local LLVM bitcode enhancements that have been contributed back"
     , "upstream but which are not available in any current LLVM release"
     , "(through 21)."
+    ]
+
+  , prim "llvm_strip_unreferenced_globals" "LLVMModule -> TopLevel LLVMModule"
+    (pureVal do_llvm_strip_unreferenced_globals)
+    Experimental
+    [ "Strip global variables from an LLVM module that are not referenced"
+    , "by any function definition, global initializer, or alias in the module."
+    , "Returns a new module with only reachable globals. This is essential for"
+    , "verifying functions in large Rust crate bitcode, where hundreds of"
+    , "tracing and allocator globals cause SAW to fail with 'Global symbol not"
+    , "allocated' errors during eager global initialization."
     ]
 
   , prim "llvm_sizeof"         "LLVMModule -> LLVMType -> Int"

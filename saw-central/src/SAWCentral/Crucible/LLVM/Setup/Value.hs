@@ -47,6 +47,7 @@ module SAWCentral.Crucible.LLVM.Setup.Value
   , modTrans
   , loadLLVMModule
   , combineLLVMModules
+  , stripUnreferencedGlobals
   , prettyLLVMModule
     -- * CrucibleContext
   , LLVMCrucibleContext(..)
@@ -77,13 +78,16 @@ module SAWCentral.Crucible.LLVM.Setup.Value
   ) where
 
 import           Control.Lens
+import           Data.Data (Data, gmapQ)
 import           Data.Map ( Map )
 import qualified Data.Map as Map
 import           Data.Maybe
 import           Data.Sequence (Seq)
+import qualified Data.Set as Set
 import           Data.Text (Text)
 import qualified Data.Text as Text
 import           Data.Type.Equality (TestEquality(..))
+import           Data.Typeable (cast)
 import           Data.Void (Void)
 import           Data.Set(Set)
 import qualified Prettyprinter as PPL
@@ -245,6 +249,66 @@ combineLLVMModules halloc (Some m1) others =
      return $ Some newModule
   where
     combineAST m (Some nm) = llvmModuleCombine m (_modAST nm)
+
+-- | Strip globals from an LLVM module that are not transitively reachable
+-- from any function definition in the module. This is essential for Rust
+-- crate bitcode where hundreds of tracing/alloc globals cause SAW to fail
+-- with "Global symbol not allocated" errors during eager initialization.
+stripUnreferencedGlobals :: (?transOpts :: CL.TranslationOptions)
+                         => Crucible.HandleAllocator
+                         -> Some LLVMModule
+                         -> IO (Some LLVMModule)
+stripUnreferencedGlobals halloc (Some m) =
+  do let ast = _modAST m
+         -- Collect all symbols referenced by function bodies and global initializers
+         reachable = computeReachableGlobals ast
+         -- Keep only globals whose symbol is in the reachable set
+         filteredGlobals = filter (\g -> L.globalSym g `Set.member` reachable)
+                                  (L.modGlobals ast)
+         newAst = ast { L.modGlobals = filteredGlobals }
+     memVar <- CL.mkMemVar (Text.pack "saw:llvm_memory") halloc
+     Some newTrans <- CL.translateModule halloc memVar newAst
+     let newModule = LLVMModule { _modFilePath = _modFilePath m
+                                , _modAST = newAst
+                                , _modTrans = newTrans
+                                }
+     return $ Some newModule
+
+-- | Compute the set of global symbols transitively reachable from all
+-- function definitions, declarations, aliases, and global initializers.
+computeReachableGlobals :: L.Module -> Set.Set L.Symbol
+computeReachableGlobals ast =
+  let globalSyms = Set.fromList (map L.globalSym (L.modGlobals ast))
+      -- Collect all symbol references from function bodies
+      defSyms = foldMap (collectSymbols . L.defBody) (L.modDefines ast)
+      -- Collect all symbol references from global initializers
+      initSyms = foldMap collectFromGlobal (L.modGlobals ast)
+      -- Collect all symbol references from aliases
+      aliasSyms = foldMap collectFromAlias (L.modAliases ast)
+      -- All referenced symbols
+      allReferenced = defSyms <> initSyms <> aliasSyms
+  in -- Keep only those that are actually globals in this module
+     Set.intersection globalSyms allReferenced
+
+-- | Collect all referenced global symbols from a global's initializer
+collectFromGlobal :: L.Global -> Set.Set L.Symbol
+collectFromGlobal g = case L.globalValue g of
+  Nothing  -> Set.empty
+  Just val -> collectSymbols val
+
+-- | Collect all referenced global symbols from an alias target
+collectFromAlias :: L.GlobalAlias -> Set.Set L.Symbol
+collectFromAlias a = collectSymbols (L.aliasTarget a)
+
+-- | Generic traversal: extract all 'L.Symbol' values from any 'Data' node.
+-- This uses SYB (Scrap Your Boilerplate) to find all Symbol occurrences
+-- in the AST, which handles all instruction types, values, constant
+-- expressions, etc. without needing to enumerate each constructor.
+collectSymbols :: Data a => a -> Set.Set L.Symbol
+collectSymbols x =
+  case cast x of
+    Just sym -> Set.singleton (sym :: L.Symbol)
+    Nothing  -> mconcat (gmapQ collectSymbols x)
 
 instance TestEquality LLVMModule where
   -- As 'LLVMModule' is an abstract type, we know that the values must

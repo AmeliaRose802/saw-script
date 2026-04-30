@@ -41,6 +41,7 @@ module SAWCentral.Crucible.LLVM.MethodSpecIR
   , modTrans
   , loadLLVMModule
   , combineLLVMModules
+  , stripUnreferencedGlobals
   , prettyLLVMModule
     -- * CrucibleContext
   , LLVMCrucibleContext(..)
