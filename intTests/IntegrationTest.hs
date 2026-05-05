@@ -132,6 +132,19 @@ testParams intTestBase verbose = do
               _ -> return "" -- may be supplied via env var
 
   verbose $ "Found saw: " <> sawExe
+
+  -- If SAW is set in the environment (e.g. by cabal's build-tool-depends),
+  -- use it as the saw command directly. Otherwise fall back to "saw" which
+  -- will be resolved via PATH.
+  envSaw <- lookupEnv "SAW"
+  let sawCmdName = case envSaw of
+        Just s | not (null s) -> s
+        _                     -> "saw"
+      -- On Windows, bash's eval interprets backslashes as escape characters,
+      -- mangling paths like C:\Users\... into C:Users... Convert to forward
+      -- slashes which bash handles correctly on all platforms.
+      bashSafe = map (\c -> if c == '\\' then '/' else c)
+
   let eVars0 = [ EV  "HOME"     absTestBase
                , EVp "PATH"     searchPathSeparator [takeDirectory sawExe]
                , EV  "TESTBASE" absTestBase
@@ -140,14 +153,25 @@ testParams intTestBase verbose = do
 
                -- The eval is used to protect the evaluation of the
                -- single-quoted arguments supplied below when run in a
-               -- bash test.sh script.
-               , EVp "SAW"      ' ' ["eval", "saw"]
+               -- bash test.sh script. The saw command path is made
+               -- bash-safe to handle Windows backslash paths.
+               , EVp "SAW"      ' ' ["eval", bashSafe sawCmdName]
                ]
       addEnvVar evs e = do v <- lookupEnv e
                            return $ updEnvVars e (fromMaybe "" v) evs
   -- override eVars0 with any environment variables set in this process
-  e1 <- foldM addEnvVar eVars0 [ "SAW", "PATH", "SAW_SOLVER_CACHE_PATH",
-                                 "JAVAC", "JAVA_HOME", "SAW_JDK_JAR" ]
+  -- Note: SAW is handled explicitly above to avoid the env value being
+  -- appended after "eval saw", which would pass the exe path as a file
+  -- argument to saw rather than using it as the command.
+  e1 <- foldM addEnvVar eVars0 [ "PATH", "SAW_SOLVER_CACHE_PATH",
+                                 "JAVAC", "JAVA_HOME", "SAW_JDK_JAR",
+                                 -- On Windows, TEMP/TMP are essential for
+                                 -- tools like ABC that create temp files.
+                                 -- Without these, they may try to write to
+                                 -- C:\Windows (from SYSTEMROOT) and fail.
+                                 "TEMP", "TMP", "TMPDIR",
+                                 "SYSTEMROOT", "APPDATA",
+                                 "LOCALAPPDATA", "USERPROFILE" ]
 
   -- Create a pathlist of jars for invoking saw
   let jarsDir = absTestBase </> "jars"
@@ -160,8 +184,8 @@ testParams intTestBase verbose = do
   jars <- intercalate [searchPathSeparator] <$> findJarsIn jarsDir
 
   -- Set the SAW env var for the testing scripts to invoke saw with the JAR
-  -- list, again allowing ENV override.
-  let e3 = updEnvVars "SAW" (unwords [ "-j", "'" <> jars <> "'" ]) e1
+  -- list. Paths are converted to forward slashes for bash compatibility.
+  let e3 = updEnvVars "SAW" (unwords [ "-j", "'" <> bashSafe jars <> "'" ]) e1
 
   return $ envVarAssocList e3
 

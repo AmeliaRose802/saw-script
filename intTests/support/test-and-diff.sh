@@ -182,12 +182,18 @@ run-tests() {
             # and for things to match that needs to be changed to "/d/".
             #
             # MSYS_NT is what the GH Windows runners produce. The
-            # other patterns are precautionary.
+            # other patterns are precautionary. Also check DIRSEP
+            # (set by the test harness) in case uname doesn't report
+            # a Windows-like string (e.g. WSL bash reporting "Linux").
             case "$(uname -s)" in
                 MSYS_NT-*|[Ww]indows*|*[Cc]ygwin*|*[Ii]nterix*)
                     sed '
                         /error, called at/s,\\,/,g
                         /at.*\.cry:[0-9]/s,\\,/,g
+                        /Loading file/s,\\,/,g
+                        /loading module/s,\\,/,g
+                        /from file/s,\\,/,g
+                        /Searched in/s,\\,/,g
                         /PosPair.*posBase =/s,\\\\,/,g
                         /PosPair.*posBase =/s,"C:,"/c,
                         /PosPair.*posBase =/s,"D:,"/d,
@@ -197,7 +203,25 @@ run-tests() {
                     '
                     ;;
                 *)
-                    cat
+                    if [ "$DIRSEP" = "\\" ]; then
+                        # Windows detected via test harness DIRSEP
+                        sed '
+                            /error, called at/s,\\,/,g
+                            /at.*\.cry:[0-9]/s,\\,/,g
+                            /Loading file/s,\\,/,g
+                            /loading module/s,\\,/,g
+                            /from file/s,\\,/,g
+                            /Searched in/s,\\,/,g
+                            /PosPair.*posBase =/s,\\\\,/,g
+                            /PosPair.*posBase =/s,"C:,"/c,
+                            /PosPair.*posBase =/s,"D:,"/d,
+                            /PosPair.*posBase =/s,"E:,"/e,
+                            /PosPair.*posBase =/s,"F:,"/f,
+                            /[^\r]$/s/$/\r/;/^$/s/$/\r/
+                        '
+                    else
+                        cat
+                    fi
                     ;;
             esac
         ) | (
@@ -225,7 +249,13 @@ run-tests() {
         # Note: because we (intentionally) aren't using set -e, we
         # don't need to failure-protect this with || true.
         # Send any errors from diff to the output so they get seen.
-        diff -u $TEST.log.good $TEST.log > $TEST.log.diff 2>&1
+        # Strip carriage returns before comparing to handle LF vs CRLF
+        # differences across platforms (e.g. WSL bash with git autocrlf).
+        if command -v tr >/dev/null 2>&1; then
+            diff -u <(tr -d '\r' < $TEST.log.good) <(tr -d '\r' < $TEST.log) > $TEST.log.diff 2>&1
+        else
+            diff -u $TEST.log.good $TEST.log > $TEST.log.diff 2>&1
+        fi
     done
 }
 
