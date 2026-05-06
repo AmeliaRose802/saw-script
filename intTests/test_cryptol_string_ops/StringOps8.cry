@@ -1,0 +1,53 @@
+module StringOps8 where
+
+type String8 = { content : [8][8], len : [64] }
+
+mk_string8 : [8][8] -> [64] -> String8
+mk_string8 c l = { content = c, len = l }
+
+string8_equal : String8 -> String8 -> Bit
+string8_equal a b =
+    a.len == b.len /\
+    (foldl (/\) True
+          [ if i < a.len then a.content @ i == b.content @ i else True
+          | i <- [0 .. 7] : [8][64]
+          ])
+
+string8_compare : String8 -> String8 -> [32]
+string8_compare a b =
+    if pfx_lt a.content b.content cmp_len
+    then -1
+    else if pfx_lt b.content a.content cmp_len
+         then 1
+         else if a.len < b.len then -1
+              else if a.len > b.len then 1
+                   else 0
+  where cmp_len = min a.len b.len
+
+private
+  pfx_lt : [8][8] -> [8][8] -> [64] -> Bit
+  pfx_lt xs ys len =
+      foldl (||) False
+            [ (i < len) && (eq_before xs ys i) && (xs @ i < ys @ i)
+            | i <- [0 .. 7] : [8][64]
+            ]
+
+  eq_before : [8][8] -> [8][8] -> [64] -> Bit
+  eq_before xs ys idx =
+      foldl (&&) True
+            [ if j < idx then xs @ j == ys @ j else True
+            | j <- [0 .. 7] : [8][64]
+            ]
+
+string8_substr : String8 -> [64] -> [64] -> String8
+string8_substr s pos count = { content = new_buf, len = new_len }
+  where
+    actual_pos   = if pos > s.len then s.len else pos
+    remaining    = s.len - actual_pos
+    actual_count = if count > remaining then remaining else count
+    new_len      = actual_count
+    new_buf      = [ if i < actual_count
+                     then s.content @ (actual_pos + i)
+                     else 0
+                   | i <- [0 .. 7] : [8][64]
+                   ]

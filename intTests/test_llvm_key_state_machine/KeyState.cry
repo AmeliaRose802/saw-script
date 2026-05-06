@@ -1,0 +1,27 @@
+module KeyState where
+
+// State constants
+state_INIT : [32]
+state_INIT = 0
+
+state_KEY_LOADED : [32]
+state_KEY_LOADED = 1
+
+state_ATTESTED : [32]
+state_ATTESTED = 2
+
+state_ERROR : [32]
+state_ERROR = 3
+
+// A state is "safe" if it's a well-defined protocol state
+is_safe_state : [32] -> Bit
+is_safe_state s = s == state_INIT    \/ s == state_KEY_LOADED \/
+                  s == state_ATTESTED \/ s == state_ERROR
+
+// After attest_key_ownership, state is either ATTESTED (success) or ERROR (failure)
+// Never KEY_LOADED (rolled back to unsafe intermediate state)
+attest_result_valid : [32] -> [32] -> Bit
+attest_result_valid old_state new_state =
+    if old_state == state_KEY_LOADED
+    then new_state == state_ATTESTED \/ new_state == state_ERROR
+    else new_state == old_state

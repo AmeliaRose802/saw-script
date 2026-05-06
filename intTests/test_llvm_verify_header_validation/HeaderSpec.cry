@@ -1,0 +1,18 @@
+module HeaderSpec where
+
+// Case-insensitive ASCII lowercase
+to_lower : [8] -> [8]
+to_lower c = if c >= 0x41 /\ c <= 0x5A then c + 0x20 else c
+
+// Check if 4 bytes case-insensitively match "true"
+is_true_header : [4][8] -> Bit
+is_true_header bytes =
+    to_lower (bytes @ 0) == 0x74 /\  // 't'
+    to_lower (bytes @ 1) == 0x72 /\  // 'r'
+    to_lower (bytes @ 2) == 0x75 /\  // 'u'
+    to_lower (bytes @ 3) == 0x65     // 'e'
+
+// Full validation spec: length must be 4 and content must match
+is_valid_metadata_header_spec : [64] -> [4][8] -> Bit
+is_valid_metadata_header_spec len bytes =
+    len == 4 /\ is_true_header bytes

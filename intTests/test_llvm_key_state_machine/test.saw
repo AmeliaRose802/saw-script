@@ -1,0 +1,106 @@
+enable_experimental;
+
+import "KeyState.cry";
+
+m <- llvm_load_module "test.bc";
+
+let i8  = llvm_int 8;
+let i32 = llvm_int 32;
+
+let session_type = llvm_struct_type [i32, llvm_array 32 i8, i32];
+
+// Model external_crypto_op as nondeterministic: may succeed or fail
+let crypto_op_spec : CrucibleSetup () = do {
+    out <- llvm_alloc (llvm_array 32 i8);
+    len <- llvm_fresh_var "len" i32;
+    
+    llvm_execute_func [out, llvm_term len];
+    
+    // On success, writes arbitrary data to output
+    result_data <- llvm_fresh_var "result_data" (llvm_array 32 i8);
+    llvm_points_to out (llvm_term result_data);
+    
+    // Return value is nondeterministic (0 = success, nonzero = failure)
+    ret <- llvm_fresh_var "crypto_result" i32;
+    llvm_return (llvm_term ret);
+};
+
+// Spec: attest_key_ownership preserves state machine invariant
+// If starts in KEY_LOADED, ends in ATTESTED or ERROR (never intermediate)
+let attest_spec : CrucibleSetup () = do {
+    session <- llvm_alloc session_type;
+    state <- llvm_fresh_var "state" i32;
+    key_data <- llvm_fresh_var "key_data" (llvm_array 32 i8);
+    key_loaded <- llvm_fresh_var "key_loaded" i32;
+    
+    llvm_points_to session (llvm_struct_value
+        [llvm_term state, llvm_term key_data, llvm_term key_loaded]);
+    
+    // Precondition: starts in KEY_LOADED
+    llvm_precond {{ state == state_KEY_LOADED }};
+    
+    llvm_execute_func [session];
+    
+    // Read final state
+    final_state <- llvm_fresh_var "final_state" i32;
+    final_key <- llvm_fresh_var "final_key" (llvm_array 32 i8);
+    final_loaded <- llvm_fresh_var "final_loaded" i32;
+    llvm_points_to session (llvm_struct_value
+        [llvm_term final_state, llvm_term final_key, llvm_term final_loaded]);
+    
+    // Postcondition: state machine invariant holds
+    llvm_postcond {{ attest_result_valid state final_state }};
+    
+    // Return value
+    ret <- llvm_fresh_var "ret" i32;
+    llvm_return (llvm_term ret);
+};
+
+// Spec: load_key preserves state machine invariant  
+let load_key_spec : CrucibleSetup () = do {
+    session <- llvm_alloc session_type;
+    state <- llvm_fresh_var "state" i32;
+    key_data <- llvm_fresh_var "key_data" (llvm_array 32 i8);
+    key_loaded <- llvm_fresh_var "key_loaded" i32;
+    
+    llvm_points_to session (llvm_struct_value
+        [llvm_term state, llvm_term key_data, llvm_term key_loaded]);
+    
+    // Key input
+    key_ptr <- llvm_alloc_readonly (llvm_array 32 i8);
+    key_bytes <- llvm_fresh_var "key_bytes" (llvm_array 32 i8);
+    llvm_points_to key_ptr (llvm_term key_bytes);
+    key_len <- llvm_fresh_var "key_len" i32;
+    
+    // Precondition: starts in INIT state
+    llvm_precond {{ state == state_INIT }};
+    llvm_precond {{ key_len <= 32 }};
+    
+    llvm_execute_func [session, key_ptr, llvm_term key_len];
+    
+    // Postcondition: state is KEY_LOADED (success path)
+    final_state <- llvm_fresh_var "final_state" i32;
+    final_key <- llvm_fresh_var "final_key" (llvm_array 32 i8);
+    final_loaded <- llvm_fresh_var "final_loaded" i32;
+    llvm_points_to session (llvm_struct_value
+        [llvm_term final_state, llvm_term final_key, llvm_term final_loaded]);
+    
+    llvm_postcond {{ final_state == state_KEY_LOADED }};
+    llvm_postcond {{ is_safe_state final_state }};
+    
+    ret <- llvm_fresh_var "ret" i32;
+    llvm_return (llvm_term ret);
+};
+
+// Phase 1: Assume crypto_op is nondeterministic
+crypto_ov <- llvm_unsafe_assume_spec m "external_crypto_op" crypto_op_spec;
+print "external_crypto_op: modeled as nondeterministic";
+
+// Phase 2: Verify state machine invariant under nondeterministic failure
+attest_result <- llvm_verify m "attest_key_ownership" [crypto_ov] false attest_spec z3;
+print "attest_key_ownership: VERIFIED - state machine invariant holds for all crypto outcomes";
+
+load_result <- llvm_verify m "load_key" [] false load_key_spec z3;
+print "load_key: VERIFIED - state machine invariant holds";
+
+print "All key state machine tests passed!";

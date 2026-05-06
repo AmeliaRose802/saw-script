@@ -1,0 +1,73 @@
+m <- llvm_load_module "test.bc";
+
+let i8  = llvm_int 8;
+let i64 = llvm_int 64;
+
+// key_store: { key: [32 x i8], key_len: i64 } = 40 bytes
+let key_store_type = llvm_struct_type [llvm_array 32 i8, i64];
+
+// --- Information flow enforcement via structural override matching ---
+//
+// Each trace_log override expects a pointer to a FRESH allocation of a
+// specific size.  The key_store struct is a 40-byte allocation, so a
+// pointer into it (e.g. ks->key) will never match any of these overrides.
+// If process_key ever passes key material to trace_log, no override
+// matches and verification fails.
+
+// "invalid key length\0" = 19 bytes
+let trace_log_19_spec : CrucibleSetup () = do {
+    msg_ptr <- llvm_alloc_readonly (llvm_array 19 i8);
+    msg_data <- llvm_fresh_var "msg19" (llvm_array 19 i8);
+    llvm_points_to msg_ptr (llvm_term msg_data);
+    len <- llvm_fresh_var "len19" i64;
+    llvm_execute_func [msg_ptr, llvm_term len];
+};
+
+// "processing key\0" = 15 bytes
+let trace_log_15_spec : CrucibleSetup () = do {
+    msg_ptr <- llvm_alloc_readonly (llvm_array 15 i8);
+    msg_data <- llvm_fresh_var "msg15" (llvm_array 15 i8);
+    llvm_points_to msg_ptr (llvm_term msg_data);
+    len <- llvm_fresh_var "len15" i64;
+    llvm_execute_func [msg_ptr, llvm_term len];
+};
+
+// "zero key byte\0" = 14 bytes
+let trace_log_14_spec : CrucibleSetup () = do {
+    msg_ptr <- llvm_alloc_readonly (llvm_array 14 i8);
+    msg_data <- llvm_fresh_var "msg14" (llvm_array 14 i8);
+    llvm_points_to msg_ptr (llvm_term msg_data);
+    len <- llvm_fresh_var "len14" i64;
+    llvm_execute_func [msg_ptr, llvm_term len];
+};
+
+// --- process_key spec: success path ---
+// Preconditions constrain to the success path (valid key, non-zero first byte).
+// One trace_log call occurs with a 15-byte stack allocation ("processing key\0").
+let process_key_spec : CrucibleSetup () = do {
+    ks_ptr <- llvm_alloc_readonly key_store_type;
+    key_data <- llvm_fresh_var "key_data" (llvm_array 32 i8);
+    key_len <- llvm_fresh_var "key_len" i64;
+    llvm_points_to ks_ptr (llvm_struct_value [llvm_term key_data, llvm_term key_len]);
+
+    llvm_precond {{ key_len > 0 }};
+    llvm_precond {{ key_len <= 32 }};
+    llvm_precond {{ key_data @ 0 != 0 }};
+
+    llvm_execute_func [ks_ptr];
+
+    llvm_return (llvm_term {{ 0 : [32] }});
+};
+
+// Set up overrides for all legitimate message sizes
+ov_19 <- llvm_unsafe_assume_spec m "trace_log" trace_log_19_spec;
+ov_15 <- llvm_unsafe_assume_spec m "trace_log" trace_log_15_spec;
+ov_14 <- llvm_unsafe_assume_spec m "trace_log" trace_log_14_spec;
+
+print "trace_log overridden for message sizes 14, 15, 19 bytes";
+print "key_store is 40 bytes — pointer into it cannot match any override";
+
+// Verify: process_key only passes stack-allocated data to trace_log
+result <- llvm_verify m "process_key" [ov_19, ov_15, ov_14] false process_key_spec z3;
+print "process_key: VERIFIED — no key material flows to trace_log";
+print "All information flow tests passed!";

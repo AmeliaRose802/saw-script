@@ -79,6 +79,15 @@ let msvc_substr  = "?substr@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D
 // operator==(const basic_string&, const basic_string&)
 let msvc_eq      = "??8std@@YA_NAEBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@0@0@Z";
 
+// std::basic_string<char>::c_str() const
+let msvc_c_str   = "?c_str@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QEBAPEBDXZ";
+
+// std::basic_string<char>::append(const basic_string&)
+let msvc_append  = "?append@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QEAAAEAV12@AEAV12@@Z";
+
+// std::basic_string<char>::operator=(const basic_string&)
+let msvc_assign  = "??4?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QEAAAEAV01@AEAV01@@Z";
+
 // GCC/Clang (Itanium ABI) equivalents — uncomment if targeting libstdc++
 // let itanium_size    = "_ZNKSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE4sizeEv";
 // let itanium_length  = "_ZNKSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE6lengthEv";
@@ -277,6 +286,84 @@ let string_substr_spec = do {
  *
  *   cmp_ov <- llvm_verify m msvc_compare [] false string_compare_spec z3;
  */
+
+// ===================================================================
+// Override: string::c_str() const
+// ===================================================================
+// const char* c_str() const;
+//   Returns a pointer to the internal null-terminated content buffer.
+//   In our model the SSO buffer already holds the first 16 bytes;
+//   c_str() simply returns a pointer to that buffer (field 0).
+
+let string_c_str_spec = do {
+    src <- fresh_string_content "src";
+
+    llvm_execute_func [ src.this_ptr ];
+
+    // c_str returns a pointer to the inline buffer (field 0 of the struct).
+    // For SSO strings (len < 16), this is the actual content.
+    // We return this_ptr cast to i8* — SAW treats the first field as offset 0.
+    llvm_return src.this_ptr;
+};
+
+// ===================================================================
+// Override: string::append(const basic_string&)
+// ===================================================================
+// basic_string& append(const basic_string& str);
+//   Appends str to *this in-place. Returns a reference to *this.
+
+let string_append_spec = do {
+    lhs <- fresh_string_content "lhs";
+    rhs <- fresh_string_content "rhs";
+
+    llvm_execute_func [ lhs.this_ptr, rhs.this_ptr ];
+
+    // Compute the appended result via Cryptol spec
+    let result = {{ string_append (mk_string lhs.content lhs.len)
+                                  (mk_string rhs.content rhs.len) }};
+
+    // Write updated content back into lhs
+    let ret_sso = {{ take`{16} result.content }};
+    llvm_points_to lhs.this_ptr
+        (llvm_struct_value [ llvm_term ret_sso
+                           , llvm_term {{ result.len }}
+                           , llvm_term {{ 256 : [64] }}
+                           ]);
+
+    // append returns a reference to *this
+    llvm_return lhs.this_ptr;
+};
+
+// ===================================================================
+// Override: string::operator=(const basic_string&)
+// ===================================================================
+// basic_string& operator=(const basic_string& str);
+//   Copy-assigns str to *this. Returns a reference to *this.
+
+let string_assign_spec = do {
+    lhs <- fresh_string_content "lhs";
+    rhs <- fresh_string_content "rhs";
+
+    llvm_execute_func [ lhs.this_ptr, rhs.this_ptr ];
+
+    // Copy rhs content into lhs via Cryptol spec
+    let result = {{ string_copy (mk_string rhs.content rhs.len) }};
+
+    // Write copied content into lhs
+    let ret_sso = {{ take`{16} result.content }};
+    llvm_points_to lhs.this_ptr
+        (llvm_struct_value [ llvm_term ret_sso
+                           , llvm_term {{ result.len }}
+                           , llvm_term {{ 256 : [64] }}
+                           ]);
+
+    // operator= returns a reference to *this
+    llvm_return lhs.this_ptr;
+};
+
+// ===================================================================
+// Convenience: register all content-aware overrides
+// ===================================================================
 let assume_string_content_overrides m = do {
     size_ov    <- llvm_unsafe_assume_spec m msvc_size    string_size_spec;
     length_ov  <- llvm_unsafe_assume_spec m msvc_length  string_size_spec;
@@ -284,6 +371,10 @@ let assume_string_content_overrides m = do {
     equal_ov   <- llvm_unsafe_assume_spec m msvc_eq      string_equal_spec;
     find_ov    <- llvm_unsafe_assume_spec m msvc_find    string_find_spec;
     substr_ov  <- llvm_unsafe_assume_spec m msvc_substr  string_substr_spec;
+    c_str_ov   <- llvm_unsafe_assume_spec m msvc_c_str   string_c_str_spec;
+    append_ov  <- llvm_unsafe_assume_spec m msvc_append  string_append_spec;
+    assign_ov  <- llvm_unsafe_assume_spec m msvc_assign  string_assign_spec;
 
-    return [ size_ov, length_ov, compare_ov, equal_ov, find_ov, substr_ov ];
+    return [ size_ov, length_ov, compare_ov, equal_ov, find_ov, substr_ov,
+             c_str_ov, append_ov, assign_ov ];
 };

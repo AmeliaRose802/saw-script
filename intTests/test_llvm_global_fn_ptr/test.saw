@@ -1,0 +1,46 @@
+enable_experimental;
+
+m <- llvm_load_module "test.bc";
+
+let i32 = llvm_int 32;
+
+// Verify add_op directly
+let add_spec : CrucibleSetup () = do {
+    a <- llvm_fresh_var "a" i32;
+    b <- llvm_fresh_var "b" i32;
+    
+    llvm_execute_func [llvm_term a, llvm_term b];
+    
+    llvm_return (llvm_term {{ a + b : [32] }});
+};
+
+add_ov <- llvm_verify m "add_op" [] false add_spec z3;
+print "add_op: VERIFIED";
+
+// Verify mul_op directly
+let mul_spec : CrucibleSetup () = do {
+    a <- llvm_fresh_var "a" i32;
+    b <- llvm_fresh_var "b" i32;
+    
+    llvm_execute_func [llvm_term a, llvm_term b];
+    
+    llvm_return (llvm_term {{ a * b : [32] }});
+};
+
+mul_ov <- llvm_verify m "mul_op" [] false mul_spec z3;
+print "mul_op: VERIFIED";
+
+// Verify dispatch with concrete index for add (op_idx = 0)
+let dispatch_add_spec : CrucibleSetup () = do {
+    a <- llvm_fresh_var "a" i32;
+    b <- llvm_fresh_var "b" i32;
+    
+    llvm_execute_func [llvm_term {{ 0 : [32] }}, llvm_term a, llvm_term b];
+    
+    llvm_return (llvm_term {{ a + b : [32] }});
+};
+
+dispatch_ov <- llvm_verify m "dispatch" [add_ov] false dispatch_add_spec z3;
+print "dispatch(0, a, b) = add_op: VERIFIED";
+
+print "All global function pointer tests passed!";

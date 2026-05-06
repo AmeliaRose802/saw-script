@@ -1,0 +1,86 @@
+// Test that SAW handles LLVM atomic operations (atomicrmw, cmpxchg, fence)
+// by modeling them as sequential loads/stores.
+
+m <- llvm_load_module "test.bc";
+
+// atomic_fetch_add: old = *ptr; *ptr = old + val; return old
+let atomic_counter_spec : CrucibleSetup () = do {
+    ptr <- llvm_alloc (llvm_int 32);
+    x <- llvm_fresh_var "x" (llvm_int 32);
+    llvm_points_to ptr (llvm_term x);
+
+    val <- llvm_fresh_var "val" (llvm_int 32);
+
+    llvm_execute_func [ptr, llvm_term val];
+
+    llvm_points_to ptr (llvm_term {{ x + val : [32] }});
+    llvm_return (llvm_term x);
+};
+
+// atomic_compare_exchange_strong:
+//   if *ptr == expected then *ptr = desired, return 1
+//   else return 0 (and *ptr unchanged)
+//
+// We verify the success case and failure case separately.
+
+let atomic_cas_success_spec : CrucibleSetup () = do {
+    ptr <- llvm_alloc (llvm_int 32);
+    x <- llvm_fresh_var "x" (llvm_int 32);
+    llvm_points_to ptr (llvm_term x);
+
+    // expected == current value => success
+    let expected = llvm_term x;
+    desired <- llvm_fresh_var "desired" (llvm_int 32);
+
+    llvm_execute_func [ptr, expected, llvm_term desired];
+
+    llvm_points_to ptr (llvm_term desired);
+    llvm_return (llvm_term {{ 1 : [32] }});
+};
+
+let atomic_cas_failure_spec : CrucibleSetup () = do {
+    ptr <- llvm_alloc (llvm_int 32);
+    x <- llvm_fresh_var "x" (llvm_int 32);
+    llvm_points_to ptr (llvm_term x);
+
+    expected <- llvm_fresh_var "expected" (llvm_int 32);
+    desired <- llvm_fresh_var "desired" (llvm_int 32);
+
+    // Precondition: expected != *ptr
+    llvm_precond {{ x != expected }};
+
+    llvm_execute_func [ptr, llvm_term expected, llvm_term desired];
+
+    // ptr unchanged on failure
+    llvm_points_to ptr (llvm_term x);
+    llvm_return (llvm_term {{ 0 : [32] }});
+};
+
+// atomic_exchange: old = *ptr; *ptr = newval; return old
+let atomic_xchg_spec : CrucibleSetup () = do {
+    ptr <- llvm_alloc (llvm_int 32);
+    x <- llvm_fresh_var "x" (llvm_int 32);
+    llvm_points_to ptr (llvm_term x);
+
+    newval <- llvm_fresh_var "newval" (llvm_int 32);
+
+    llvm_execute_func [ptr, llvm_term newval];
+
+    llvm_points_to ptr (llvm_term newval);
+    llvm_return (llvm_term x);
+};
+
+// Verify all specs
+llvm_verify m "atomic_counter" [] false atomic_counter_spec z3;
+print "atomic_counter: VERIFIED";
+
+llvm_verify m "atomic_cas" [] false atomic_cas_success_spec z3;
+print "atomic_cas (success): VERIFIED";
+
+llvm_verify m "atomic_cas" [] false atomic_cas_failure_spec z3;
+print "atomic_cas (failure): VERIFIED";
+
+llvm_verify m "atomic_xchg" [] false atomic_xchg_spec z3;
+print "atomic_xchg: VERIFIED";
+
+print "All atomic operation tests passed!";

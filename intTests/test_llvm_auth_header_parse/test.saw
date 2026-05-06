@@ -1,0 +1,59 @@
+enable_experimental;
+
+import "AuthSpec.cry";
+
+m <- llvm_load_module "test.bc";
+
+let i8  = llvm_int 8;
+let i32 = llvm_int 32;
+let i64 = llvm_int 64;
+
+let token_type = llvm_struct_type [i64, i64];
+
+// --- Verify validate_auth_scheme with a concrete valid header ---
+// "HMAC-SHA256 key123 abcdef" (25 bytes)
+let validate_valid_spec : CrucibleSetup () = do {
+    let header_bytes = {{ "HMAC-SHA256 key123 abcdef" : [25][8] }};
+    ptr <- llvm_alloc_readonly (llvm_array 25 i8);
+    llvm_points_to ptr (llvm_term header_bytes);
+    
+    llvm_execute_func [ptr, llvm_term {{ 25 : [64] }}];
+    
+    // Valid header -> returns 1
+    llvm_return (llvm_term {{ 1 : [8] }});
+};
+
+valid_ov <- llvm_verify m "validate_auth_scheme" [] false validate_valid_spec z3;
+print "validate_auth_scheme (valid header): VERIFIED";
+
+// --- Verify validate_auth_scheme rejects wrong scheme ---
+let validate_invalid_spec : CrucibleSetup () = do {
+    let header_bytes = {{ "Bearer key123 abcdef00000" : [25][8] }};
+    ptr <- llvm_alloc_readonly (llvm_array 25 i8);
+    llvm_points_to ptr (llvm_term header_bytes);
+    
+    llvm_execute_func [ptr, llvm_term {{ 25 : [64] }}];
+    
+    // Invalid scheme -> returns 0
+    llvm_return (llvm_term {{ 0 : [8] }});
+};
+
+invalid_ov <- llvm_verify m "validate_auth_scheme" [] false validate_invalid_spec z3;
+print "validate_auth_scheme (wrong scheme): VERIFIED - correctly rejected";
+
+// --- Verify validate_auth_scheme rejects too few tokens ---
+let validate_short_spec : CrucibleSetup () = do {
+    let header_bytes = {{ "HMAC-SHA256 keyonly00000" : [24][8] }};
+    ptr <- llvm_alloc_readonly (llvm_array 24 i8);
+    llvm_points_to ptr (llvm_term header_bytes);
+    
+    llvm_execute_func [ptr, llvm_term {{ 24 : [64] }}];
+    
+    // Only 2 tokens -> returns 0
+    llvm_return (llvm_term {{ 0 : [8] }});
+};
+
+short_ov <- llvm_verify m "validate_auth_scheme" [] false validate_short_spec z3;
+print "validate_auth_scheme (too few tokens): VERIFIED - correctly rejected";
+
+print "All auth header parsing tests passed!";

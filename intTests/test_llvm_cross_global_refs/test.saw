@@ -1,0 +1,38 @@
+enable_experimental;
+
+m <- llvm_load_module "test.bc";
+
+// Spec: read_via_global_ptr returns lookup_table[2] which is 300
+// The const globals are auto-populated during module init.
+// This exercises populateRec: table_ptr's initializer references lookup_table
+// via a GEP constant expression, so lookup_table must be recursively populated first.
+let read_via_global_ptr_spec : CrucibleSetup () = do {
+    llvm_execute_func [];
+    llvm_return (llvm_term {{ 300 : [32] }});
+};
+
+// Spec: read_config_data returns secondary_data which is 42
+// This exercises populateRec: global_config's initializer contains a pointer
+// to secondary_data, so secondary_data must be recursively populated first.
+let read_config_data_spec : CrucibleSetup () = do {
+    llvm_execute_func [];
+    llvm_return (llvm_term {{ 42 : [32] }});
+};
+
+// Spec: read_both returns 300 + 42 = 342
+// Exercises both cross-global references together.
+let read_both_spec : CrucibleSetup () = do {
+    llvm_execute_func [];
+    llvm_return (llvm_term {{ 342 : [32] }});
+};
+
+read_via_global_ptr_result <- llvm_verify m "read_via_global_ptr" [] false read_via_global_ptr_spec z3;
+print "read_via_global_ptr: VERIFIED";
+
+read_config_data_result <- llvm_verify m "read_config_data" [] false read_config_data_spec z3;
+print "read_config_data: VERIFIED";
+
+read_both_result <- llvm_verify m "read_both" [] false read_both_spec z3;
+print "read_both: VERIFIED";
+
+print "All cross-global reference tests passed!";

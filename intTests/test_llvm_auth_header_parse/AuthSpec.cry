@@ -1,0 +1,17 @@
+module AuthSpec where
+
+// Expected auth scheme bytes: "HMAC-SHA256"
+hmac_scheme : [11][8]
+hmac_scheme = "HMAC-SHA256"
+
+// Check if bytes at offset match the HMAC scheme
+matches_scheme : [64][8] -> [64] -> Bit
+matches_scheme data offset =
+    foldl (/\) True
+        [ data @ (offset + i) == hmac_scheme @ i
+        | i <- [0..10] : [11][64]
+        ]
+
+// Count spaces from position
+is_space : [8] -> Bit
+is_space c = c == 0x20

@@ -1,0 +1,56 @@
+enable_experimental;
+
+import "StringModel.cry";
+
+m <- llvm_load_module "test.bc";
+
+let i8  = llvm_int 8;
+let i64 = llvm_int 64;
+let i32 = llvm_int 32;
+
+let string_layout = llvm_struct_type [llvm_array 16 i8, i64, i64];
+
+// Spec: string_size returns the size field
+let size_spec : CrucibleSetup () = do {
+    ptr <- llvm_alloc_readonly string_layout;
+    buf <- llvm_fresh_var "buf" (llvm_array 16 i8);
+    sz  <- llvm_fresh_var "sz"  i64;
+    cap <- llvm_fresh_var "cap" i64;
+    llvm_points_to ptr (llvm_struct_value [llvm_term buf, llvm_term sz, llvm_term cap]);
+
+    llvm_execute_func [ptr];
+
+    llvm_return (llvm_term sz);
+};
+
+// Spec: string_equal returns 1 iff same size and matching prefix
+let equal_spec : CrucibleSetup () = do {
+    a_ptr <- llvm_alloc_readonly string_layout;
+    a_buf <- llvm_fresh_var "a_buf" (llvm_array 16 i8);
+    a_sz  <- llvm_fresh_var "a_sz"  i64;
+    a_cap <- llvm_fresh_var "a_cap" i64;
+    llvm_precond {{ a_sz <= 16 }};
+    llvm_points_to a_ptr (llvm_struct_value [llvm_term a_buf, llvm_term a_sz, llvm_term a_cap]);
+
+    b_ptr <- llvm_alloc_readonly string_layout;
+    b_buf <- llvm_fresh_var "b_buf" (llvm_array 16 i8);
+    b_sz  <- llvm_fresh_var "b_sz"  i64;
+    b_cap <- llvm_fresh_var "b_cap" i64;
+    llvm_precond {{ b_sz <= 16 }};
+    llvm_points_to b_ptr (llvm_struct_value [llvm_term b_buf, llvm_term b_sz, llvm_term b_cap]);
+
+    llvm_execute_func [a_ptr, b_ptr];
+
+    let a_str = {{ mk_string (a_buf # (zero:[240][8])) a_sz }};
+    let b_str = {{ mk_string (b_buf # (zero:[240][8])) b_sz }};
+    let result = {{ if string_equal a_str b_str then 1:[32] else 0:[32] }};
+    llvm_return (llvm_term result);
+};
+
+size_result <- llvm_verify m "string_size" [] false size_spec z3;
+print "string_size: VERIFIED";
+
+equal_result <- llvm_verify m "string_equal" [] false equal_spec z3;
+print "string_equal: VERIFIED";
+
+print "All string model tests passed!";

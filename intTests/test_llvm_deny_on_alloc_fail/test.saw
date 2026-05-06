@@ -1,0 +1,58 @@
+enable_experimental;
+
+m <- llvm_load_module "test.bc";
+
+let i8  = llvm_int 8;
+let i32 = llvm_int 32;
+let i64 = llvm_int 64;
+
+// Model string_alloc as failing (returns null)
+let alloc_fail_spec : CrucibleSetup () = do {
+    size <- llvm_fresh_var "size" i64;
+    llvm_execute_func [llvm_term size];
+    llvm_return llvm_null;
+};
+
+// Model string_free as no-op
+let free_spec : CrucibleSetup () = do {
+    ptr <- llvm_alloc (llvm_array 1 i8);
+    llvm_execute_func [ptr];
+};
+
+// Spec: when alloc fails, is_valid_authorization returns -1 (denial)
+let auth_alloc_fail_spec : CrucibleSetup () = do {
+    header_ptr <- llvm_alloc_readonly (llvm_array 32 i8);
+    header <- llvm_fresh_var "header" (llvm_array 32 i8);
+    llvm_points_to header_ptr (llvm_term header);
+    header_len <- llvm_fresh_var "header_len" i64;
+    llvm_precond {{ header_len <= 32 }};
+    
+    llvm_execute_func [header_ptr, llvm_term header_len];
+    
+    // MUST return -1 (error/denial), never 1 (authorized)
+    llvm_return (llvm_term {{ -1 : [32] }});
+};
+
+alloc_ov <- llvm_unsafe_assume_spec m "string_alloc" alloc_fail_spec;
+
+auth_fail_ov <- llvm_verify m "is_valid_authorization" [alloc_ov] false auth_alloc_fail_spec z3;
+print "is_valid_authorization (alloc fails): VERIFIED - returns denial";
+
+// Spec: check_authorization returns 0 when alloc fails
+let check_alloc_fail_spec : CrucibleSetup () = do {
+    header_ptr <- llvm_alloc_readonly (llvm_array 32 i8);
+    header <- llvm_fresh_var "header" (llvm_array 32 i8);
+    llvm_points_to header_ptr (llvm_term header);
+    header_len <- llvm_fresh_var "header_len" i64;
+    llvm_precond {{ header_len <= 32 }};
+    
+    llvm_execute_func [header_ptr, llvm_term header_len];
+    
+    // MUST return 0 (unauthorized), never 1
+    llvm_return (llvm_term {{ 0 : [8] }});
+};
+
+check_ov <- llvm_verify m "check_authorization" [auth_fail_ov] false check_alloc_fail_spec z3;
+print "check_authorization (alloc fails): VERIFIED - never returns authorized";
+
+print "All denial-on-alloc-failure tests passed!";

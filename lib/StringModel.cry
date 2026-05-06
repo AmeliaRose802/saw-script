@@ -97,7 +97,7 @@ private
   eq_before : [256][8] -> [256][8] -> [64] -> [64] -> Bit
   eq_before xs ys idx len =
       foldl (&&) True
-            [ if j < idx && j < len then xs @ j == ys @ j else True
+            [ if (j < idx) && (j < len) then xs @ j == ys @ j else True
             | j <- [0 .. 255] : [256][64]
             ]
 
@@ -153,8 +153,7 @@ string_find_from haystack needle start =
               | i <- [0 .. 255] : [256][64]
               ]
   where
-    pick best (i, True)  = if i < best then i else best
-    pick best (_, False)  = best
+    pick best (i, m) = if m && (i < best) then i else best
 
     match_at pos =
         (pos >= start) &&
@@ -186,3 +185,47 @@ string_append a b = { content = new_buf, len = new_len }
                      else 0
               | i <- [0 .. 255] : [256][64]
               ]
+
+/* ================================================================== */
+/* C-string extraction                                                */
+/* ================================================================== */
+
+/**
+ * Extract a null-terminated byte sequence: the first `len` bytes of
+ * content followed by a 0x00 terminator.  Bytes beyond len+1 are zero.
+ * Models std::string::c_str() / data().
+ */
+string_c_str : StringContent -> [256][8]
+string_c_str s =
+    [ if i < s.len then s.content @ i
+      else if i == s.len then 0
+      else 0
+    | i <- [0 .. 255] : [256][64]
+    ]
+
+/* ================================================================== */
+/* Copy                                                               */
+/* ================================================================== */
+
+/**
+ * Copy a string (trivial identity — returns the same content/len).
+ * Models copy-construction and operator=.
+ */
+string_copy : StringContent -> StringContent
+string_copy s = { content = s.content, len = s.len }
+
+/* ================================================================== */
+/* Prefix check                                                       */
+/* ================================================================== */
+
+/**
+ * Check whether `s` starts with `prefix`.
+ * Returns True iff the first `prefix.len` bytes of `s` match `prefix`.
+ */
+string_starts_with : StringContent -> StringContent -> Bit
+string_starts_with s prefix =
+    prefix.len <= s.len /\
+    foldl (/\) True
+          [ if i < prefix.len then s.content @ i == prefix.content @ i else True
+          | i <- [0 .. 255] : [256][64]
+          ]

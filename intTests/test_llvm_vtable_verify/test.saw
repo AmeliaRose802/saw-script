@@ -1,0 +1,111 @@
+enable_experimental;
+
+m <- llvm_load_module "test.bc";
+
+let i8  = llvm_int 8;
+let i32 = llvm_int 32;
+
+// Use the named LLVM struct type from the bitcode
+let ks_type = llvm_alias "struct.mem_key_store";
+
+// --- Verify mem_write: stores data and sets len ---
+let write_spec : CrucibleSetup () = do {
+    // Allocate the key store struct
+    self <- llvm_alloc ks_type;
+
+    // Set up initial struct state
+    old_storage <- llvm_fresh_var "old_storage" (llvm_array 64 i8);
+    old_len <- llvm_fresh_var "old_len" i32;
+    vtable_ptr <- llvm_fresh_var "vtable_ptr" (llvm_int 64);
+    llvm_points_to_at_type self ks_type
+        (llvm_struct_value
+            [ llvm_term vtable_ptr
+            , llvm_term old_storage
+            , llvm_term old_len
+            ]);
+
+    // Input buffer with 8 bytes of data
+    buf <- llvm_alloc_readonly (llvm_array 8 i8);
+    data <- llvm_fresh_var "data" (llvm_array 8 i8);
+    llvm_points_to buf (llvm_term data);
+
+    llvm_execute_func [self, buf, llvm_term {{ 8 : [32] }}];
+
+    // After write: first 8 bytes match data, stored_len = 8
+    new_storage <- llvm_fresh_var "new_storage" (llvm_array 64 i8);
+    llvm_points_to_at_type self ks_type
+        (llvm_struct_value
+            [ llvm_term vtable_ptr
+            , llvm_term new_storage
+            , llvm_term {{ 8 : [32] }}
+            ]);
+    llvm_postcond {{ take`{8} new_storage == data }};
+
+    llvm_return (llvm_term {{ 0 : [32] }});
+};
+
+write_ov <- llvm_verify m "mem_write" [] false write_spec z3;
+print "mem_write: VERIFIED";
+
+// --- Verify mem_read: reads data correctly ---
+let read_spec : CrucibleSetup () = do {
+    self <- llvm_alloc_readonly ks_type;
+
+    storage <- llvm_fresh_var "storage" (llvm_array 64 i8);
+    stored_len <- llvm_fresh_var "stored_len" i32;
+    vtable_ptr <- llvm_fresh_var "vtable_ptr" (llvm_int 64);
+    llvm_points_to_at_type self ks_type
+        (llvm_struct_value
+            [ llvm_term vtable_ptr
+            , llvm_term storage
+            , llvm_term stored_len
+            ]);
+
+    // Precondition: stored_len >= 8
+    llvm_precond {{ stored_len >= 8 }};
+
+    buf <- llvm_alloc (llvm_array 8 i8);
+
+    llvm_execute_func [self, buf, llvm_term {{ 8 : [32] }}];
+
+    // After read: buf contains first 8 bytes of storage
+    llvm_points_to buf (llvm_term {{ take`{8} storage }});
+
+    llvm_return (llvm_term {{ 0 : [32] }});
+};
+
+read_ov <- llvm_verify m "mem_read" [] false read_spec z3;
+print "mem_read: VERIFIED";
+
+// --- Verify store_and_retrieve compositionally ---
+let roundtrip_spec : CrucibleSetup () = do {
+    self <- llvm_alloc ks_type;
+
+    old_storage <- llvm_fresh_var "old_storage" (llvm_array 64 i8);
+    old_len <- llvm_fresh_var "old_len" i32;
+    vtable_ptr <- llvm_fresh_var "vtable_ptr" (llvm_int 64);
+    llvm_points_to_at_type self ks_type
+        (llvm_struct_value
+            [ llvm_term vtable_ptr
+            , llvm_term old_storage
+            , llvm_term old_len
+            ]);
+
+    data_ptr <- llvm_alloc_readonly (llvm_array 8 i8);
+    data <- llvm_fresh_var "data" (llvm_array 8 i8);
+    llvm_points_to data_ptr (llvm_term data);
+
+    out_ptr <- llvm_alloc (llvm_array 8 i8);
+
+    llvm_execute_func [self, data_ptr, llvm_term {{ 8 : [32] }}, out_ptr, llvm_term {{ 8 : [32] }}];
+
+    // Output equals input (roundtrip property)
+    llvm_points_to out_ptr (llvm_term data);
+
+    llvm_return (llvm_term {{ 0 : [32] }});
+};
+
+roundtrip_ov <- llvm_verify m "store_and_retrieve" [write_ov, read_ov] false roundtrip_spec z3;
+print "store_and_retrieve: VERIFIED compositionally (write + read roundtrip)";
+
+print "All vtable verification tests passed!";

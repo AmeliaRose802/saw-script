@@ -1,0 +1,82 @@
+enable_experimental;
+
+import "ValidatorSpecs.cry";
+
+m <- llvm_load_module "test.bc";
+
+let i8  = llvm_int 8;
+let i64 = llvm_int 64;
+
+// --- 1. is_valid_request_date ---
+let date_spec : CrucibleSetup () = do {
+    ptr <- llvm_alloc (llvm_array 10 i8);
+    bytes <- llvm_fresh_var "bytes" (llvm_array 10 i8);
+    llvm_points_to ptr (llvm_term bytes);
+    len <- llvm_fresh_var "len" i64;
+
+    llvm_execute_func [ptr, llvm_term len];
+
+    let result = {{ if len == 10 /\ is_valid_date_spec bytes then 1:[8] else 0:[8] }};
+    llvm_return (llvm_term result);
+};
+
+date_ov <- llvm_verify m "is_valid_request_date" [] false date_spec z3;
+print "1/4 is_valid_request_date: VERIFIED";
+
+// --- 2. is_valid_claims_header ---
+let claims_spec : CrucibleSetup () = do {
+    ptr <- llvm_alloc (llvm_array 1 i8);
+    first_byte <- llvm_fresh_var "first" (llvm_array 1 i8);
+    llvm_points_to ptr (llvm_term first_byte);
+    len <- llvm_fresh_var "len" i64;
+    llvm_precond {{ len >= 1 }};
+
+    llvm_execute_func [ptr, llvm_term len];
+
+    let result = {{ if is_valid_claims_spec len (first_byte @ 0) then 1:[8] else 0:[8] }};
+    llvm_return (llvm_term result);
+};
+
+claims_ov <- llvm_verify m "is_valid_claims_header" [] false claims_spec z3;
+print "2/4 is_valid_claims_header: VERIFIED";
+
+// --- 3. latch_local ---
+let latch_spec : CrucibleSetup () = do {
+    state_ptr <- llvm_alloc i8;
+    old_state <- llvm_fresh_var "old_state" i8;
+    llvm_points_to state_ptr (llvm_term old_state);
+
+    llvm_execute_func [state_ptr];
+
+    let new_state = {{ if old_state == 0 then 1:[8] else old_state }};
+    llvm_points_to state_ptr (llvm_term new_state);
+    llvm_return (llvm_term {{ latch_result old_state }});
+};
+
+latch_ov <- llvm_verify m "latch_local" [] false latch_spec z3;
+print "3/4 latch_local: VERIFIED";
+
+// --- 4. latch_key_local ---
+let latch_key_spec : CrucibleSetup () = do {
+    state_ptr <- llvm_alloc i8;
+    old_state <- llvm_fresh_var "old_state" i8;
+    llvm_points_to state_ptr (llvm_term old_state);
+
+    key_ptr <- llvm_alloc_readonly (llvm_array 32 i8);
+    key_data <- llvm_fresh_var "key_data" (llvm_array 32 i8);
+    llvm_points_to key_ptr (llvm_term key_data);
+    key_len <- llvm_fresh_var "key_len" i64;
+
+    llvm_execute_func [state_ptr, key_ptr, llvm_term key_len];
+
+    let new_state = {{ if key_len == 0 then old_state
+                       else if old_state == 0 then 1:[8]
+                       else old_state }};
+    llvm_points_to state_ptr (llvm_term new_state);
+    llvm_return (llvm_term {{ latch_key_result old_state key_len }});
+};
+
+latch_key_ov <- llvm_verify m "latch_key_local" [] false latch_key_spec z3;
+print "4/4 latch_key_local: VERIFIED";
+
+print "All 4 Rust validation functions verified with llvm_verify!";

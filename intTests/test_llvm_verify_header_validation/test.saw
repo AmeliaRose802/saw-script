@@ -1,0 +1,55 @@
+enable_experimental;
+
+import "HeaderSpec.cry";
+
+m <- llvm_load_module "test.bc";
+
+let i8  = llvm_int 8;
+let i64 = llvm_int 64;
+
+// PHASE 1: Verify is_valid_metadata_header directly (replaces llvm_unsafe_assume_spec)
+// When length == 4 and bytes match "true" (case-insensitive) => returns 1
+let header_valid_spec : CrucibleSetup () = do {
+    ptr <- llvm_alloc (llvm_array 4 i8);
+    bytes <- llvm_fresh_var "bytes" (llvm_array 4 i8);
+    llvm_points_to ptr (llvm_term bytes);
+
+    len <- llvm_fresh_var "len" i64;
+
+    llvm_execute_func [ptr, llvm_term len];
+
+    let result = {{ if is_valid_metadata_header_spec len bytes
+                    then 1 : [8]
+                    else 0 : [8] }};
+    llvm_return (llvm_term result);
+};
+
+// Verify the actual implementation matches the Cryptol spec
+header_ov <- llvm_verify m "is_valid_metadata_header" [] false header_valid_spec z3;
+print "is_valid_metadata_header: VERIFIED with llvm_verify (not unsafe_assume!)";
+
+// PHASE 2: Use the verified spec compositionally in process_request
+let process_valid_spec : CrucibleSetup () = do {
+    h_ptr <- llvm_alloc (llvm_array 4 i8);
+    h_bytes <- llvm_fresh_var "h_bytes" (llvm_array 4 i8);
+    llvm_points_to h_ptr (llvm_term h_bytes);
+    h_len <- llvm_fresh_var "h_len" i64;
+
+    p_ptr <- llvm_alloc (llvm_array 1 i8);
+    p_data <- llvm_fresh_var "p_data" (llvm_array 1 i8);
+    llvm_points_to p_ptr (llvm_term p_data);
+    p_len <- llvm_fresh_var "p_len" i64;
+
+    llvm_execute_func [h_ptr, llvm_term h_len, p_ptr, llvm_term p_len];
+
+    let result = {{ if is_valid_metadata_header_spec h_len h_bytes
+                    then 1 : [8]
+                    else 0 : [8] }};
+    llvm_return (llvm_term result);
+};
+
+// Compositional verification: use header_ov as an override
+process_ov <- llvm_verify m "process_request" [header_ov] false process_valid_spec z3;
+print "process_request: VERIFIED compositionally using verified header spec";
+
+print "All header validation tests passed!";

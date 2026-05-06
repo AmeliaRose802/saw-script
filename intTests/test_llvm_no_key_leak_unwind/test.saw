@@ -1,0 +1,98 @@
+enable_experimental;
+
+m <- llvm_load_module "test.bc";
+
+let i8  = llvm_int 8;
+let i32 = llvm_int 32;
+
+let result_type = llvm_struct_type [llvm_array 32 i8, i32, i8];
+
+// Model crypto_derive as nondeterministic (may write arbitrary data, may fail)
+let crypto_derive_fail_spec : CrucibleSetup () = do {
+    out <- llvm_alloc (llvm_array 32 i8);
+    out_len <- llvm_fresh_var "out_len" i32;
+    
+    key_ptr <- llvm_alloc_readonly (llvm_array 32 i8);
+    key <- llvm_fresh_var "key" (llvm_array 32 i8);
+    llvm_points_to key_ptr (llvm_term key);
+    key_len <- llvm_fresh_var "key_len" i32;
+    
+    llvm_execute_func [out, llvm_term out_len, key_ptr, llvm_term key_len];
+    
+    // May write partial/arbitrary data to output
+    partial_data <- llvm_fresh_var "partial" (llvm_array 32 i8);
+    llvm_points_to out (llvm_term partial_data);
+    
+    // Returns nonzero (failure)
+    llvm_return (llvm_term {{ 1 : [32] }});
+};
+
+// Spec: on failure path, proof buffer is zeroed
+let attest_fail_spec : CrucibleSetup () = do {
+    key_ptr <- llvm_alloc_readonly (llvm_array 32 i8);
+    key <- llvm_fresh_var "key" (llvm_array 32 i8);
+    llvm_points_to key_ptr (llvm_term key);
+    
+    result <- llvm_alloc result_type;
+    
+    llvm_execute_func [key_ptr, llvm_term {{ 32 : [32] }}, result];
+    
+    // Postcondition: proof is all zeros (no key material leaked)
+    llvm_points_to result (llvm_struct_value [
+        llvm_term {{ zero : [32][8] }},
+        llvm_term {{ 0 : [32] }},
+        llvm_term {{ 0 : [8] }}
+    ]);
+    
+    llvm_return (llvm_term {{ -1 : [32] }});
+};
+
+// Test: when crypto_derive fails, proof buffer is zeroed
+fail_ov <- llvm_unsafe_assume_spec m "crypto_derive" crypto_derive_fail_spec;
+
+attest_ov <- llvm_verify m "create_attestation" [fail_ov] false attest_fail_spec z3;
+print "create_attestation (failure path): VERIFIED - proof buffer zeroed, no key leak";
+
+// Model crypto_derive succeeding
+let crypto_derive_ok_spec : CrucibleSetup () = do {
+    out <- llvm_alloc (llvm_array 32 i8);
+    out_len <- llvm_fresh_var "out_len" i32;
+    
+    key_ptr <- llvm_alloc_readonly (llvm_array 32 i8);
+    key <- llvm_fresh_var "key" (llvm_array 32 i8);
+    llvm_points_to key_ptr (llvm_term key);
+    key_len <- llvm_fresh_var "key_len" i32;
+    
+    llvm_execute_func [out, llvm_term out_len, key_ptr, llvm_term key_len];
+    
+    proof <- llvm_fresh_var "proof" (llvm_array 32 i8);
+    llvm_points_to out (llvm_term proof);
+    
+    llvm_return (llvm_term {{ 0 : [32] }});
+};
+
+// Spec: on success, result is valid
+let attest_ok_spec : CrucibleSetup () = do {
+    key_ptr <- llvm_alloc_readonly (llvm_array 32 i8);
+    key <- llvm_fresh_var "key" (llvm_array 32 i8);
+    llvm_points_to key_ptr (llvm_term key);
+    
+    result <- llvm_alloc result_type;
+    
+    llvm_execute_func [key_ptr, llvm_term {{ 32 : [32] }}, result];
+    
+    proof <- llvm_fresh_var "proof" (llvm_array 32 i8);
+    llvm_points_to result (llvm_struct_value [
+        llvm_term proof,
+        llvm_term {{ 32 : [32] }},
+        llvm_term {{ 1 : [8] }}
+    ]);
+    
+    llvm_return (llvm_term {{ 0 : [32] }});
+};
+
+ok_ov <- llvm_unsafe_assume_spec m "crypto_derive" crypto_derive_ok_spec;
+attest_ok <- llvm_verify m "create_attestation" [ok_ov] false attest_ok_spec z3;
+print "create_attestation (success path): VERIFIED";
+
+print "All key leak prevention tests passed!";

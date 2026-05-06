@@ -1,0 +1,29 @@
+module ValidatorSpecs where
+
+is_digit : [8] -> Bit
+is_digit c = c >= 0x30 /\ c <= 0x39
+
+is_valid_date_spec : [10][8] -> Bit
+is_valid_date_spec bytes =
+    bytes @ 4 == 0x2D /\
+    bytes @ 7 == 0x2D /\
+    is_digit (bytes @ 0) /\ is_digit (bytes @ 1) /\
+    is_digit (bytes @ 2) /\ is_digit (bytes @ 3) /\
+    is_digit (bytes @ 5) /\ is_digit (bytes @ 6) /\
+    is_digit (bytes @ 8) /\ is_digit (bytes @ 9)
+
+is_valid_claims_spec : [64] -> [8] -> Bit
+is_valid_claims_spec len first_byte =
+    len > 0 /\ first_byte == 0x7B
+
+// Latch result: 0 = Ok, 1 = AlreadyLatched
+latch_result : [8] -> [8]
+latch_result old_state =
+    if old_state == 0 then 0 else 1
+
+// Latch key result: 0 = Ok, 1 = AlreadyLatched, 2 = InvalidKey
+latch_key_result : [8] -> [64] -> [8]
+latch_key_result old_state key_len =
+    if key_len == 0 then 2
+    else if old_state == 0 then 0
+    else 1
