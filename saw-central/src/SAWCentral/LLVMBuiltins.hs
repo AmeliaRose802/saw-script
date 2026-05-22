@@ -30,8 +30,7 @@ import qualified Data.Text as Text
 import Data.Parameterized.Some
 import Control.Monad (unless, forM_)
 import Control.Monad.State (gets)
-import Data.List (isPrefixOf, isSuffixOf)
-import Data.Maybe (mapMaybe, catMaybes)
+import Data.List (isPrefixOf)
 
 import qualified Text.LLVM.AST as LLVM
 import qualified Data.LLVM.BitCode as LLVM
@@ -118,9 +117,10 @@ llvm_struct_type = LLVM.Struct
 --     slot 2: ~MyClass (destructor)
 --     slot 3: MyClass::method1
 --     slot 4: MyClass::method2
-llvm_vtable_slots :: Some CMS.LLVMModule -> String -> TopLevel ()
-llvm_vtable_slots (Some llvmMod) classPattern = do
-  let ast = CMS.modAST llvmMod
+llvm_vtable_slots :: Some CMS.LLVMModule -> Text -> TopLevel ()
+llvm_vtable_slots (Some llvmMod) classPatternText = do
+  let classPattern = Text.unpack classPatternText
+      ast = CMS.modAST llvmMod
       globals = LLVM.modGlobals ast
       -- Find vtables: globals with names starting with "_ZTV" containing the pattern
       vtables = filter (isVtableForClass classPattern) globals
@@ -171,13 +171,13 @@ printVtableSlots value = do
 extractVtableSlots :: LLVM.Value -> [String]
 extractVtableSlots val = case val of
   -- Vtables are often struct initializers
-  LLVM.ValStruct _ fields -> concatMap extractFromField fields
+  LLVM.ValStruct fields -> concatMap extractFromField (map LLVM.typedValue fields)
   
   -- Or arrays of structs
   LLVM.ValArray _ elements -> concatMap extractVtableSlots elements
   
   -- Packed structs
-  LLVM.ValPackedStruct _ fields -> concatMap extractFromField fields
+  LLVM.ValPackedStruct fields -> concatMap extractFromField (map LLVM.typedValue fields)
   
   -- Sometimes they're just directly initialized with values
   _ -> [describeValue val]
@@ -185,9 +185,9 @@ extractVtableSlots val = case val of
 -- | Extract slot info from a struct field, which might be nested.
 extractFromField :: LLVM.Value -> [String]
 extractFromField val = case val of
-  LLVM.ValStruct _ fields -> concatMap extractFromField fields
+  LLVM.ValStruct fields -> concatMap extractFromField (map LLVM.typedValue fields)
   LLVM.ValArray _ elements -> map describeValue elements
-  LLVM.ValPackedStruct _ fields -> concatMap extractFromField fields
+  LLVM.ValPackedStruct fields -> concatMap extractFromField (map LLVM.typedValue fields)
   _ -> [describeValue val]
 
 -- | Describe a single vtable slot value.
@@ -197,13 +197,13 @@ describeValue val = case val of
   LLVM.ValSymbol sym -> show sym
   
   -- Null pointer (unused slot or end marker)
-  LLVM.ValZeroInit _ -> "null"
+  LLVM.ValZeroInit -> "null"
   
   -- Constant integer (offset-to-top, etc.)
   LLVM.ValInteger i -> "constant " ++ show i
   
   -- Bitcast of a function pointer
-  LLVM.ValConstExpr (LLVM.ConstConv LLVM.BitCast _ (LLVM.Typed _ inner)) ->
+  LLVM.ValConstExpr (LLVM.ConstConv LLVM.BitCast (LLVM.Typed _ inner) _) ->
     describeValue inner
   
   -- Pointer arithmetic (GEP)
