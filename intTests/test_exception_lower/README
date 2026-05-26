@@ -1,0 +1,19 @@
+test_exception_lower
+====================
+
+Pins down the contract that the `saw-tools/exception-lower` pass is
+expected to produce: throws become flag-set + sentinel return, catches
+become flag-check + clear, and unhandled paths re-raise by re-setting
+the flag.
+
+The test only depends on `$SAW` and the committed `error-return-value.bc`,
+so it runs in CI without the exception-lower binary (or LLVM development
+headers) being available.
+
+Regenerating the bitcode
+------------------------
+
+    make regen
+
+requires a working `clang++`.  The current artefact was built with the
+version recorded in `error-return-value.bc.FROM`.
