@@ -137,9 +137,9 @@ parseArg LLVM.Typed { LLVM.typedType = t } (nm, loc) = do
 
 stmtCalls :: [LLVM.Stmt] -> Set Text
 stmtCalls [] = Set.empty
-stmtCalls (LLVM.Result _ (LLVM.Call _ _ (LLVM.ValSymbol (LLVM.Symbol s)) _) _ _:stmts) =
+stmtCalls (LLVM.Result _ (LLVM.Call _ _ (LLVM.ValSymbol (LLVM.Symbol s)) _ _) _ _:stmts) =
   Set.insert (Text.pack s) $ stmtCalls stmts
-stmtCalls (LLVM.Effect (LLVM.Call _ _ (LLVM.ValSymbol (LLVM.Symbol s)) _) _ _:stmts) =
+stmtCalls (LLVM.Effect (LLVM.Call _ _ (LLVM.ValSymbol (LLVM.Symbol s)) _ _) _ _:stmts) =
   Set.insert (Text.pack s) $ stmtCalls stmts
 stmtCalls (_:stmts) = stmtCalls stmts
 
@@ -157,7 +157,7 @@ stmtDebugDeclares (LLVM.Result _ instr drs md:stmts)
           LLVM.ValMd (LLVM.ValMdDebugInfo (LLVM.DebugInfoLocalVariable LLVM.DILocalVariable { LLVM.dilvArg = a }))
         }
       , _
-      ] <- instr
+      ] _ <- instr
   , s == "llvm.dbg.declare" || s == "llvm.dbg.value"
   , Just (LLVM.ValMdLoc LLVM.DebugLoc { LLVM.dlLine = line, LLVM.dlCol = col }) <- lookup "dbg" md
   = Map.insert (fromIntegral a) (Location (fromIntegral line) . Just $ fromIntegral col) $ stmtDebugDeclares stmts
@@ -172,7 +172,7 @@ stmtDebugDeclares (LLVM.Effect instr drs md:stmts)
           LLVM.ValMd (LLVM.ValMdDebugInfo (LLVM.DebugInfoLocalVariable LLVM.DILocalVariable { LLVM.dilvArg = a }))
         }
       , _
-      ] <- instr
+      ] _ <- instr
   , s == "llvm.dbg.declare" || s == "llvm.dbg.value"
   , Just (LLVM.ValMdLoc LLVM.DebugLoc { LLVM.dlLine = line, LLVM.dlCol = col }) <- lookup "dbg" md
   = Map.insert (fromIntegral a) (Location (fromIntegral line) . Just $ fromIntegral col) $ stmtDebugDeclares stmts
