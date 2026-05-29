@@ -1,0 +1,113 @@
+# Demo tests merge gate
+#
+# Runs a curated set of small, fast demo / smoke tests so we catch regressions
+# in the SAWScript surface our fork relies on (loop-fixpoint primitives,
+# llvm_strip_unreferenced_globals, basic LLVM verification flow, etc.) before
+# merging into the fork's master.
+#
+# This is intentionally lighter than the full SAWScript integration-tests run
+# in ci.yml: it builds only what's needed to produce the `saw` binary, runs
+# the demo list defined in .github/run-demo-tests.sh, and finishes in well
+# under the full pipeline's runtime.
+
+name: Demo tests
+on:
+  push:
+    branches:
+      - master
+      - "ci/**"
+      - "saw/**"
+  pull_request:
+    branches:
+      - master
+  workflow_dispatch:
+
+# Cancel older runs on the same branch when a new one is pushed.
+concurrency:
+  group: demo-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Keep in sync with .github/workflows/ci.yml.
+  CABAL_CACHE_VERSION: 12
+  SOLVER_PKG_VERSION: "snapshot-20260119"
+
+jobs:
+  demo-tests:
+    name: Demo tests (ubuntu-24.04, GHC 9.6.7)
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Initialize submodules
+        run: git submodule update --init
+
+      - uses: haskell-actions/setup@v2
+        id: setup-haskell
+        with:
+          ghc-version: "9.6.7"
+          cabal-version: "3.10.3.0"
+
+      - name: Install system deps (what4-solvers, etc.)
+        shell: bash
+        env:
+          BUILD_TARGET_OS: ubuntu-24.04
+          BUILD_TARGET_ARCH: ${{ runner.arch }}
+        run: .github/ci.sh install_system_deps
+
+      - name: Install clang (for loop-fixpoint bitcode rebuild)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang
+
+      - uses: actions/cache/restore@v4
+        name: Restore cabal store cache
+        with:
+          path: |
+            ${{ steps.setup-haskell.outputs.cabal-store }}
+            dist-newstyle
+          key: |
+            ${{ env.CABAL_CACHE_VERSION }}-cabal-ubuntu-24.04-9.6.7-${{ hashFiles('cabal.GHC-9.6.7.config') }}-${{ github.sha }}
+          restore-keys: |
+            ${{ env.CABAL_CACHE_VERSION }}-cabal-ubuntu-24.04-9.6.7-${{ hashFiles('cabal.GHC-9.6.7.config') }}-
+
+      - name: Build saw
+        shell: bash
+        env:
+          ENABLE_HPC: "false"
+        run: |
+          ghc_ver="$(ghc --numeric-version)"
+          cp "cabal.GHC-${ghc_ver}.config" cabal.project.freeze
+          cabal v2-update
+          ./build.sh gitrev
+          cabal v2-configure -j --disable-documentation
+          cat cabal.project.ci >> cabal.project.local
+          cabal v2-build exe:saw
+
+      - name: Locate saw binary
+        id: locate-saw
+        shell: bash
+        run: |
+          saw_bin="$(cabal list-bin exe:saw)"
+          echo "saw_bin=${saw_bin}" >> "$GITHUB_OUTPUT"
+          echo "SAW resolved to: ${saw_bin}"
+          "${saw_bin}" --version
+
+      - uses: actions/cache/save@v4
+        name: Save cabal store cache
+        if: always()
+        with:
+          path: |
+            ${{ steps.setup-haskell.outputs.cabal-store }}
+            dist-newstyle
+          key: |
+            ${{ env.CABAL_CACHE_VERSION }}-cabal-ubuntu-24.04-9.6.7-${{ hashFiles('cabal.GHC-9.6.7.config') }}-${{ github.sha }}
+
+      - name: Run demo tests
+        shell: bash
+        env:
+          SAW: ${{ steps.locate-saw.outputs.saw_bin }}
+        run: bash .github/run-demo-tests.sh
